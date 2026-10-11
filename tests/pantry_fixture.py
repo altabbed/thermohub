@@ -1,0 +1,140 @@
+"""A Cookidoo pantry document shaped like a real cookidoo.com.au response."""
+
+PANTRY = {
+    "recipes": [
+        {
+            "id": "r100001",
+            "title": "Spaghetti bolognese",
+            "isCustomerRecipe": False,
+            "descriptiveAssets": [
+                {
+                    "square": "https://assets.example/{transformation}/bolognese",
+                    "portrait": "https://assets.example/{transformation}/bolognese",
+                    "landscape": "https://assets.example/{transformation}/bolognese",
+                }
+            ],
+            "recipeIngredientGroups": [
+                {
+                    "id": "item-onion-1",
+                    "isOwned": False,
+                    "optional": False,
+                    "quantity": {"value": 1},
+                    "unitNotation": "",
+                    "ingredient_ref": "com.vorwerk.ingredients.Ingredient-onion",
+                    "ingredientNotation": "brown onion",
+                    "shoppingCategory_ref": "ShoppingCategory-veg",
+                },
+                {
+                    "id": "item-garlic-1",
+                    "isOwned": False,
+                    "optional": False,
+                    "quantity": {"from": 1, "to": 2},
+                    "unitNotation": "cloves",
+                    "ingredient_ref": "com.vorwerk.ingredients.Ingredient-garlic",
+                    "ingredientNotation": "garlic",
+                    "shoppingCategory_ref": "ShoppingCategory-veg",
+                },
+                {
+                    "id": "item-oil-1",
+                    "isOwned": False,
+                    "optional": False,
+                    "quantity": {"value": 20},
+                    "unitNotation": "g",
+                    "ingredient_ref": "com.vorwerk.ingredients.Ingredient-oil",
+                    "ingredientNotation": "olive oil",
+                    "shoppingCategory_ref": "ShoppingCategory-pantry",
+                },
+                {
+                    "id": "item-salt-1",
+                    "isOwned": True,
+                    "optional": False,
+                    "quantity": {"value": 1},
+                    "unitNotation": "pinch",
+                    "ingredient_ref": "com.vorwerk.ingredients.Ingredient-salt",
+                    "ingredientNotation": "salt",
+                    "shoppingCategory_ref": "ShoppingCategory-pantry",
+                },
+                {
+                    "id": "item-parmesan-1",
+                    "isOwned": False,
+                    "optional": True,
+                    "quantity": {"value": 30},
+                    "unitNotation": "g",
+                    "ingredient_ref": "com.vorwerk.ingredients.Ingredient-parmesan",
+                    "ingredientNotation": "parmesan",
+                    "shoppingCategory_ref": "ShoppingCategory-dairy",
+                },
+            ],
+        },
+        {
+            "id": "r100002",
+            "title": "French onion soup",
+            "isCustomerRecipe": False,
+            "descriptiveAssets": None,
+            "recipeIngredientGroups": [
+                {
+                    "id": "item-onion-2",
+                    "isOwned": False,
+                    "optional": False,
+                    "quantity": {"value": 2},
+                    "unitNotation": "",
+                    "ingredient_ref": "com.vorwerk.ingredients.Ingredient-onion",
+                    "ingredientNotation": "brown onions",
+                    "shoppingCategory_ref": "ShoppingCategory-veg",
+                },
+                {
+                    "id": "item-garlic-2",
+                    "isOwned": False,
+                    "optional": False,
+                    "quantity": {"value": 2},
+                    "unitNotation": "cloves",
+                    "ingredient_ref": "com.vorwerk.ingredients.Ingredient-garlic",
+                    "ingredientNotation": "garlic",
+                    "shoppingCategory_ref": "ShoppingCategory-veg",
+                },
+                {
+                    "id": "item-oil-2",
+                    "isOwned": False,
+                    "optional": False,
+                    "quantity": {"value": 1},
+                    "unitNotation": "tbsp",
+                    "ingredient_ref": "com.vorwerk.ingredients.Ingredient-oil",
+                    "ingredientNotation": "olive oil",
+                    "shoppingCategory_ref": "ShoppingCategory-pantry",
+                },
+                {
+                    "id": "item-salt-2",
+                    "isOwned": False,
+                    "optional": False,
+                    "quantity": {"value": 1},
+                    "unitNotation": "pinch",
+                    "ingredient_ref": "com.vorwerk.ingredients.Ingredient-salt",
+                    "ingredientNotation": "salt",
+                    "shoppingCategory_ref": "ShoppingCategory-pantry",
+                },
+            ],
+        },
+    ],
+    "customerRecipes": [
+        {
+            "id": "01K2CVHK2FCUSTOM",
+            "title": "Nan's scones",
+            "isCustomerRecipe": True,
+            "descriptiveAssets": None,
+            "recipeIngredientGroups": [
+                {
+                    "id": "item-custom-flour",
+                    "isOwned": False,
+                    "ingredientNotation": "350 g self-raising flour",
+                    "shoppingCategory_ref": "ShoppingCategory-rpf-10",
+                    "isCustomerRecipeIngredient": True,
+                },
+            ],
+        }
+    ],
+    "additionalItems": [
+        {"id": "extra-1", "name": "Toilet paper", "isOwned": False},
+        {"id": "extra-2", "name": "toilet  paper ", "isOwned": False},
+        {"id": "extra-3", "name": "Dishwasher tablets", "isOwned": True},
+    ],
+}

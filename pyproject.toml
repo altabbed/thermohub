@@ -1,0 +1,19 @@
+[project]
+name = "thermohub"
+version = "0.1.0"
+description = "Glue between Cookidoo and grocery services"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true

@@ -1,0 +1,58 @@
+"""API response models."""
+
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+class Quantity(BaseModel):
+    amount: float = Field(description="Amount, or the lower bound of a range.")
+    amount_max: float | None = Field(
+        default=None, description="Upper bound when Cookidoo gives a range (e.g. 1-2)."
+    )
+    unit: str = Field(description='Unit as written by Cookidoo; "" for a plain count.')
+
+
+class ItemSource(BaseModel):
+    """One Cookidoo shopping list entry that contributes to a ShoppingItem."""
+
+    item_id: str = Field(description="Cookidoo's id for this shopping list entry.")
+    type: Literal["recipe", "additional"]
+    recipe_id: str | None = None
+    recipe_name: str | None = None
+    quantity: Quantity | None = None
+    optional: bool = False
+    owned: bool = Field(description="Ticked off in Cookidoo (already have it).")
+
+
+class ShoppingItem(BaseModel):
+    """A thing to buy, merged across every recipe and extra item that needs it."""
+
+    name: str
+    ingredient_ref: str | None = Field(
+        description="Cookidoo's ingredient id; null for extra items and "
+        "ingredients of user-created recipes (free text)."
+    )
+    category_ref: str | None = Field(description="Cookidoo's shopping category id.")
+    quantities: list[Quantity] = Field(
+        description="Totals per unit. Entries without a quantity are not counted."
+    )
+    display: str = Field(description='Human-readable total, e.g. "300 g + 2".')
+    owned: bool = Field(description="True when every source is ticked off.")
+    optional: bool = Field(description="True when every recipe lists it as optional.")
+    sources: list[ItemSource]
+
+
+class RecipeSummary(BaseModel):
+    id: str
+    name: str
+    url: str
+    thumbnail: str | None = None
+    custom: bool = Field(description="A recipe the user created in Cookidoo.")
+
+
+class ShoppingList(BaseModel):
+    fetched_at: datetime
+    items: list[ShoppingItem]
+    recipes: list[RecipeSummary]

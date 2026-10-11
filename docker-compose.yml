@@ -1,0 +1,14 @@
+services:
+  thermohub:
+    build: .
+    image: thermohub:latest
+    container_name: thermohub
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - thermohub-data:/data
+    restart: unless-stopped
+
+volumes:
+  thermohub-data:
