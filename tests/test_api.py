@@ -45,6 +45,14 @@ def test_health():
     assert make_client().get("/health").json() == {"status": "ok"}
 
 
+def test_web_ui_is_served_without_api_key():
+    response = make_client(api_key="s3cret").get("/")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "api/shopping-list" in response.text
+
+
 def test_shopping_list():
     response = make_client().get("/api/shopping-list")
 

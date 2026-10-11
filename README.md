@@ -1,12 +1,13 @@
 # Thermohub
 
 A small service that connects to [Cookidoo](https://cookidoo.com.au) and serves
-your Thermomix shopping list over an HTTP API. It's meant to run as a Docker
-container on Unraid (or any Docker host) on your home network.
+your Thermomix shopping list as a web page and an HTTP API. It's meant to run
+as a Docker container on Unraid (or any Docker host) on your home network.
 
 **What it does today:** it pulls the shopping list and merges it into one list
 of things to buy. Ingredients needed by several recipes become one entry with
 totals ("3 brown onions"). Items you've ticked off in Cookidoo are left out.
+Open `http://<host>:8000/` to see the list; it works on a phone.
 
 **Planned:** decide whether to buy each item at Woolworths or Coles, fill the
 cart, and learn your preferred products from order history (with reminders for
@@ -34,8 +35,9 @@ or Unraid won't be able to pull it.
 2. **Docker → Add Container → Template: thermohub**.
 3. Fill in your Cookidoo email and password. Setting an **API key** is
    recommended, since anything on your network can reach the container.
-4. **Apply**. Click the container icon → **WebUI** to open the interactive API
-   docs at `http://<unraid-ip>:8000/docs`.
+4. **Apply**. Click the container icon → **WebUI** to open the shopping list
+   at `http://<unraid-ip>:8000/`. If you set an API key, the page asks for it
+   once and remembers it in that browser.
 
 The template defaults:
 
@@ -74,6 +76,13 @@ All configuration is environment variables (or `.env` with Compose).
 On first use the service logs in with your email and password. It saves the
 resulting tokens to `/data/cookidoo_token.json` and refreshes them from then
 on, so restarts don't need a fresh password login.
+
+## Web page
+
+`GET /` is the shopping list page: every item with its total and the recipes
+that need it, the recipes on the list (linking to Cookidoo), and a toggle for
+ticked-off items. It's read-only for now. It reads the API below, so it shows
+the same data.
 
 ## API
 
@@ -174,6 +183,7 @@ COOKIDOO_EMAIL=... COOKIDOO_PASSWORD=... THERMOHUB_DATA_DIR=./data \
 | Path | |
 | --- | --- |
 | `thermohub/main.py` | FastAPI app, routes, API-key check |
+| `thermohub/static/index.html` | The web page (plain HTML/JS, no build step) |
 | `thermohub/cookidoo_client.py` | Cookidoo login, token persistence, fetching the raw list |
 | `thermohub/shopping_list.py` | Merging the raw list into `ShoppingList` |
 | `thermohub/models.py` | Response models (also the OpenAPI schema) |
@@ -187,10 +197,9 @@ run them after bumping the version.
 
 ## Roadmap
 
-1. ~~Cookidoo shopping list API~~
+1. ~~Cookidoo shopping list API and page~~
 2. Woolworths and Coles product search; map each ingredient to products
 3. Decide where to shop (price, availability, splitting the basket)
 4. Fill the online cart
 5. Order history: preferred products, and "you usually buy this every N weeks"
    suggestions
-6. Web front end

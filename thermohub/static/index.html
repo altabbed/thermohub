@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Thermohub</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f5;
+    --surface: #ffffff;
+    --text: #1d2420;
+    --muted: #66706a;
+    --border: #e1e5e2;
+    --accent: #2f7d4f;
+    --accent-text: #ffffff;
+    --chip: #eef3ef;
+    --error-bg: #fdecea;
+    --error-text: #8a1c12;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141816;
+      --surface: #1c211e;
+      --text: #e6ebe7;
+      --muted: #98a39c;
+      --border: #2c332f;
+      --accent: #5cb57f;
+      --accent-text: #0f1a13;
+      --chip: #24302a;
+      --error-bg: #3a1d1a;
+      --error-text: #f4b4ab;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .page { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; flex-wrap: wrap; align-items: end; gap: 12px 16px; margin-bottom: 20px; }
+  header .title { flex: 1 1 auto; }
+  h1 { margin: 0; font-size: 1.6rem; letter-spacing: -0.01em; }
+  #status { margin: 2px 0 0; color: var(--muted); font-size: 0.9rem; }
+  .actions { display: flex; align-items: center; gap: 12px; }
+  .toggle { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 0.9rem; cursor: pointer; }
+  button {
+    font: inherit; font-size: 0.9rem; font-weight: 600;
+    padding: 8px 14px; border-radius: 8px; border: 0;
+    background: var(--accent); color: var(--accent-text); cursor: pointer;
+  }
+  button:disabled { opacity: 0.6; cursor: default; }
+  h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 24px 0 8px; }
+  .recipes { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+  .recipe {
+    display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
+    padding: 4px 12px 4px 4px; border-radius: 999px; background: var(--chip);
+    color: var(--text); text-decoration: none; font-size: 0.9rem; white-space: nowrap;
+  }
+  .recipe img, .recipe .placeholder { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; background: var(--border); }
+  .recipe:hover { outline: 1px solid var(--accent); }
+  ul.items { list-style: none; margin: 0; padding: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
+  .item { display: flex; gap: 12px; align-items: baseline; padding: 12px 16px; border-top: 1px solid var(--border); }
+  .item:first-child { border-top: 0; }
+  .item .main { flex: 1 1 auto; min-width: 0; }
+  .item .name { font-weight: 600; }
+  .item .from { color: var(--muted); font-size: 0.85rem; }
+  .item .qty { flex: 0 0 auto; font-variant-numeric: tabular-nums; color: var(--muted); text-align: right; }
+  .item.owned .name, .item.owned .qty { text-decoration: line-through; color: var(--muted); }
+  .badge { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 4px; background: var(--chip); color: var(--muted); font-size: 0.75rem; font-weight: 500; vertical-align: 1px; }
+  .notice { padding: 14px 16px; border-radius: 12px; background: var(--surface); border: 1px solid var(--border); color: var(--muted); }
+  .notice.error { background: var(--error-bg); border-color: transparent; color: var(--error-text); }
+  form.key { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  form.key label { flex: 1 0 100%; }
+  form.key input { flex: 1 1 200px; font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+  footer { margin-top: 32px; font-size: 0.85rem; color: var(--muted); }
+  footer a { color: var(--muted); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div class="title">
+      <h1>Shopping list</h1>
+      <p id="status">Loading…</p>
+    </div>
+    <div class="actions">
+      <label class="toggle"><input type="checkbox" id="include-owned"> Show ticked off</label>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <form id="key-form" class="notice key" hidden>
+    <label for="key-input">This Thermohub needs its API key.</label>
+    <input id="key-input" type="password" autocomplete="current-password" placeholder="API key">
+    <button type="submit">Save</button>
+  </form>
+  <p id="error" class="notice error" hidden></p>
+  <p id="empty" class="notice" hidden>Nothing to buy. Add recipes to your Cookidoo shopping list and refresh.</p>
+
+  <section id="recipes-section" hidden>
+    <h2>Recipes</h2>
+    <div id="recipes" class="recipes"></div>
+  </section>
+
+  <section id="items-section" hidden>
+    <h2>To buy</h2>
+    <ul id="items" class="items"></ul>
+  </section>
+
+  <footer><a href="docs">API docs</a></footer>
+</div>
+
+<script>
+  const KEY_STORAGE = "thermohub-api-key";
+  const $ = (id) => document.getElementById(id);
+
+  function storedKey() {
+    try { return localStorage.getItem(KEY_STORAGE) || ""; } catch { return ""; }
+  }
+
+  function storeKey(key) {
+    try { localStorage.setItem(KEY_STORAGE, key); } catch { /* private mode: key lasts this page only */ }
+    sessionKey = key;
+  }
+
+  let sessionKey = storedKey();
+
+  function el(tag, props = {}, children = []) {
+    const node = document.createElement(tag);
+    Object.assign(node, props);
+    node.append(...children);
+    return node;
+  }
+
+  function show(id, visible) { $(id).hidden = !visible; }
+
+  function plural(n, word) { return `${n} ${word}${n === 1 ? "" : "s"}`; }
+
+  function setStatus(text) { $("status").textContent = text; }
+
+  async function load() {
+    $("refresh").disabled = true;
+    setStatus("Loading…");
+    show("error", false);
+    try {
+      const headers = sessionKey ? { "X-API-Key": sessionKey } : {};
+      const includeOwned = $("include-owned").checked;
+      const res = await fetch(`api/shopping-list?include_owned=${includeOwned}`, { headers });
+      if (res.status === 401) {
+        setStatus("");
+        show("key-form", true);
+        $("key-input").focus();
+        return;
+      }
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || `Request failed (${res.status})`);
+      show("key-form", false);
+      render(body);
+    } catch (err) {
+      setStatus("");
+      $("error").textContent = err instanceof TypeError ? "Can't reach Thermohub." : err.message;
+      show("error", true);
+    } finally {
+      $("refresh").disabled = false;
+    }
+  }
+
+  function render(list) {
+    const fetched = new Date(list.fetched_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    setStatus(`${plural(list.items.length, "item")} from ${plural(list.recipes.length, "recipe")} · updated ${fetched}`);
+
+    $("recipes").replaceChildren(...list.recipes.map(renderRecipe));
+    show("recipes-section", list.recipes.length > 0);
+
+    $("items").replaceChildren(...list.items.map(renderItem));
+    show("items-section", list.items.length > 0);
+    show("empty", list.items.length === 0);
+  }
+
+  function renderRecipe(recipe) {
+    const image = isHttpUrl(recipe.thumbnail)
+      ? el("img", { src: recipe.thumbnail, alt: "", loading: "lazy" })
+      : el("span", { className: "placeholder" });
+    const link = el("a", { className: "recipe" }, [image, recipe.name]);
+    if (isHttpUrl(recipe.url)) {
+      link.href = recipe.url;
+      link.target = "_blank";
+      link.rel = "noopener";
+    }
+    return link;
+  }
+
+  function renderItem(item) {
+    const name = el("div", { className: "name" }, [item.name]);
+    if (item.optional) name.append(el("span", { className: "badge", textContent: "optional" }));
+    if (item.owned) name.append(el("span", { className: "badge", textContent: "ticked off" }));
+
+    const from = [...new Set(item.sources.map((s) => s.recipe_name || "Added to list"))];
+    return el("li", { className: item.owned ? "item owned" : "item" }, [
+      el("div", { className: "main" }, [name, el("div", { className: "from", textContent: from.join(" · ") })]),
+      el("div", { className: "qty", textContent: item.display }),
+    ]);
+  }
+
+  function isHttpUrl(value) {
+    return typeof value === "string" && /^https?:\/\//.test(value);
+  }
+
+  $("refresh").addEventListener("click", load);
+  $("include-owned").addEventListener("change", load);
+  $("key-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    storeKey($("key-input").value.trim());
+    load();
+  });
+
+  load();
+</script>
+</body>
+</html>

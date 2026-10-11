@@ -8,11 +8,11 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/altabbed/thermohub/issues</Support>
   <Project>https://github.com/altabbed/thermohub</Project>
-  <Overview>Connects to Cookidoo and serves your Thermomix shopping list as a merged list of things to buy over a small HTTP API. The WebUI link opens the interactive API docs.</Overview>
+  <Overview>Connects to Cookidoo and serves your Thermomix shopping list as a merged list of things to buy, as a web page and a small HTTP API.</Overview>
   <Category>Tools:</Category>
-  <WebUI>http://[IP]:[PORT:8000]/docs</WebUI>
+  <WebUI>http://[IP]:[PORT:8000]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/altabbed/thermohub/main/unraid/thermohub.xml</TemplateURL>
-  <Config Name="WebUI / API port" Target="8000" Default="8000" Mode="tcp" Description="Port the API is served on. Change the host side if 8000 is taken." Type="Port" Display="always" Required="true" Mask="false">8000</Config>
+  <Config Name="WebUI / API port" Target="8000" Default="8000" Mode="tcp" Description="Port the web page and API are served on. Change the host side if 8000 is taken." Type="Port" Display="always" Required="true" Mask="false">8000</Config>
   <Config Name="Appdata" Target="/data" Default="/mnt/user/appdata/thermohub" Mode="rw" Description="Stores the Cookidoo login tokens so restarts don't need a fresh login." Type="Path" Display="advanced" Required="true" Mask="false">/mnt/user/appdata/thermohub</Config>
   <Config Name="Cookidoo email" Target="COOKIDOO_EMAIL" Default="" Mode="" Description="Email you sign in to Cookidoo with." Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="Cookidoo password" Target="COOKIDOO_PASSWORD" Default="" Mode="" Description="Your Cookidoo password." Type="Variable" Display="always" Required="true" Mask="true"/>

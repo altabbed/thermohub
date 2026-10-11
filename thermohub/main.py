@@ -3,11 +3,13 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import logging
+from pathlib import Path
 import secrets
 from typing import Annotated
 
 from cookidoo_api import CookidooAuthException, CookidooException
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Security
+from fastapi.responses import FileResponse
 from fastapi.security import APIKeyHeader
 
 from thermohub.config import Settings, get_settings
@@ -73,3 +75,9 @@ app.include_router(api)
 @app.get("/health", include_in_schema=False)
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/", include_in_schema=False)
+async def index() -> FileResponse:
+    # The page is static; it calls /api itself, sending the API key if one is set.
+    return FileResponse(Path(__file__).parent / "static" / "index.html")
