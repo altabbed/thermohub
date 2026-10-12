@@ -56,3 +56,76 @@ class ShoppingList(BaseModel):
     fetched_at: datetime
     items: list[ShoppingItem]
     recipes: list[RecipeSummary]
+
+
+StoreId = Literal["woolworths", "coles"]
+
+
+class UnitPrice(BaseModel):
+    price: float = Field(description="Price per 1 kg, 1 L or 1 each.")
+    per: Literal["kg", "L", "each"]
+    text: str = Field(description='As the store shows it, e.g. "$13.57 per 1kg".')
+
+
+class StoreProduct(BaseModel):
+    store: StoreId
+    id: str = Field(description="The store's product id (Woolworths stockcode, Coles id).")
+    name: str
+    size: str | None = None
+    price: float = Field(description="Shelf price for one.")
+    was_price: float | None = None
+    on_special: bool = False
+    unit_price: UnitPrice | None = None
+    image: str | None = None
+    url: str
+
+
+class StoreMatch(BaseModel):
+    search_term: str
+    candidates: list[StoreProduct] = Field(
+        description="Available products in the store's relevance order; the first is the pick."
+    )
+    error: str | None = Field(default=None, description="Why the search failed, if it did.")
+
+
+class CompareItem(BaseModel):
+    name: str
+    matches: dict[StoreId, StoreMatch]
+    cheaper: StoreId | None = Field(
+        description="Store whose first candidate is cheaper; null on a tie or if either is missing."
+    )
+
+
+class StoreTotal(BaseModel):
+    store: StoreId
+    total: float = Field(description="Sum of picks for the items found at every store.")
+    found: int = Field(description="How many of the items this store has.")
+
+
+class Comparison(BaseModel):
+    items: list[CompareItem]
+    totals: list[StoreTotal]
+    split_total: float = Field(description="Buying each item wherever it is cheaper.")
+    compared: int = Field(description="Items found at every store, which the totals cover.")
+    cheapest: StoreId | None
+
+
+class CompareRequest(BaseModel):
+    items: list[str] = Field(min_length=1, max_length=60)
+
+
+class Check(BaseModel):
+    ok: bool
+    detail: str
+
+
+class StoreStatus(BaseModel):
+    id: StoreId
+    name: str
+    prices: Check
+    account: Check
+
+
+class Status(BaseModel):
+    cookidoo: Check
+    stores: list[StoreStatus]

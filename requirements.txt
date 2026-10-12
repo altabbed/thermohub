@@ -1,6 +1,8 @@
 # cookidoo-api is pinned exactly: thermohub/cookidoo_client.py uses some of its
 # private methods, so check that file still works before bumping it.
 cookidoo-api==0.18.4
+# Browser-like HTTP client for the Woolworths and Coles sites (see thermohub/stores).
+curl_cffi==0.16.3
 fastapi==0.143.0
 pydantic-settings==2.15.0
 uvicorn==0.54.0

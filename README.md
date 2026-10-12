@@ -4,19 +4,27 @@ A small service that connects to [Cookidoo](https://cookidoo.com.au) and serves
 your Thermomix shopping list as a web page and an HTTP API. It's meant to run
 as a Docker container on Unraid (or any Docker host) on your home network.
 
-**What it does today:** it pulls the shopping list and merges it into one list
-of things to buy. Ingredients needed by several recipes become one entry with
-totals ("3 brown onions"). Items you've ticked off in Cookidoo are left out.
-Open `http://<host>:8000/` to see the list; it works on a phone.
+**What it does today:**
 
-**Planned:** decide whether to buy each item at Woolworths or Coles, fill the
-cart, and learn your preferred products from order history (with reminders for
-things you buy regularly). See [Roadmap](#roadmap).
+- Pulls the shopping list and merges it into one list of things to buy.
+  Ingredients needed by several recipes become one entry with totals
+  ("3 brown onions"). Items you've ticked off in Cookidoo are left out.
+- Prices the items you pick at Woolworths and Coles and tells you which is
+  cheaper, and what splitting the shop between them would cost.
+- Shows whether Cookidoo and each store's price lookups are working.
 
-> Cookidoo has no public API. This uses the unofficial
+Open `http://<host>:8000/`; it works on a phone too.
+
+**Planned:** sign in to your Woolworths/Coles accounts to fill the cart, and
+learn your preferred products from order history (with reminders for things
+you buy regularly). See [Roadmap](#roadmap).
+
+> None of these services has a public API. Cookidoo goes through the unofficial
 > [`cookidoo-api`](https://github.com/miaucl/cookidoo-api) library (the one
-> behind Home Assistant's Cookidoo integration), so a Cookidoo change can break
-> it until the library catches up.
+> behind Home Assistant's Cookidoo integration). Woolworths and Coles prices
+> come from the same data their websites load, fetched with a browser-like
+> HTTP client because both sites use bot protection. Any of them can change
+> without notice and break that part until it's updated.
 
 ## Install on Unraid
 
@@ -79,10 +87,34 @@ on, so restarts don't need a fresh password login.
 
 ## Web page
 
-`GET /` is the shopping list page: every item with its total and the recipes
-that need it, the recipes on the list (linking to Cookidoo), and a toggle for
-ticked-off items. It's read-only for now. It reads the API below, so it shows
-the same data.
+`GET /` has three parts:
+
+- **Connections:** whether Cookidoo is signed in and whether Woolworths and
+  Coles price lookups work right now, with the reason when they don't. Store
+  accounts show "Not connected" until cart filling is built.
+- **Shopping list:** tick the items you want to price (or **Select all**).
+- **Woolworths vs Coles:** after **Compare prices**, which store is cheaper and
+  by how much, each store's total, the cost of splitting the shop, and every
+  item side by side with the cheaper one highlighted.
+
+Each item is matched to the store's top search result. When that's the wrong
+product (loose onions instead of a 1 kg bag, say), pick another from the list
+under it and the totals update. Totals count one of each product and only
+include items both stores have; recipe quantities aren't matched to pack
+sizes yet.
+
+## How prices are looked up
+
+- **Woolworths:** the JSON search API behind woolworths.com.au.
+- **Coles:** the data embedded in coles.com.au search pages. Prices are for
+  Coles' default store, which can differ a little from your local store.
+
+Both sites block ordinary scripts, so requests go through
+[`curl_cffi`](https://github.com/lexiforest/curl_cffi), which looks like Chrome
+to the site, after first loading the home page like a browser would. Results
+are cached for 30 minutes. If a store starts blocking your server anyway, its
+card on the page turns red with the reason, and the comparison still shows the
+other store.
 
 ## API
 
@@ -164,6 +196,38 @@ How items are merged:
 Errors from Cookidoo (bad password, Cookidoo down) return `502` with a
 `detail` message.
 
+### `GET /api/status`
+
+Checks every connection live: Cookidoo (fetches the shopping list) and each
+store (searches for "milk"). Each check is `{"ok": bool, "detail": str}`.
+
+```json
+{
+  "cookidoo": { "ok": true, "detail": "Signed in as you@example.com" },
+  "stores": [
+    {
+      "id": "woolworths",
+      "name": "Woolworths",
+      "prices": { "ok": true, "detail": "Price lookups working" },
+      "account": { "ok": false, "detail": "Only needed later, to fill your cart." }
+    }
+  ]
+}
+```
+
+### `POST /api/compare`
+
+Body: `{"items": ["brown onion", "garlic"]}` (1 to 60 names). Each name is
+searched at every store. Quantities at the start of free-text names ("350 g
+self-raising flour") are dropped from the search.
+
+For each item, `matches.<store>.candidates` holds up to five available
+products in the store's relevance order (name, size, price, was-price, unit
+price per kg/L/each, image, link). The first is the pick. `cheaper` names the
+store whose pick costs less. `totals`, `split_total` and `cheapest` summarise
+the picks for the `compared` items that every store has. A store that
+couldn't be searched sets `matches.<store>.error`.
+
 ### `GET /health`
 
 Returns `{"status": "ok"}` without contacting Cookidoo. The Docker health
@@ -186,6 +250,8 @@ COOKIDOO_EMAIL=... COOKIDOO_PASSWORD=... THERMOHUB_DATA_DIR=./data \
 | `thermohub/static/index.html` | The web page (plain HTML/JS, no build step) |
 | `thermohub/cookidoo_client.py` | Cookidoo login, token persistence, fetching the raw list |
 | `thermohub/shopping_list.py` | Merging the raw list into `ShoppingList` |
+| `thermohub/stores/` | Woolworths and Coles product search |
+| `thermohub/compare.py` | Pricing items at each store and totalling |
 | `thermohub/models.py` | Response models (also the OpenAPI schema) |
 | `unraid/thermohub.xml` | Unraid container template |
 
@@ -198,8 +264,9 @@ run them after bumping the version.
 ## Roadmap
 
 1. ~~Cookidoo shopping list API and page~~
-2. Woolworths and Coles product search; map each ingredient to products
-3. Decide where to shop (price, availability, splitting the basket)
-4. Fill the online cart
+2. ~~Woolworths and Coles price comparison~~
+3. Remember the product you choose for each ingredient; match recipe
+   quantities to pack sizes
+4. Sign in to Woolworths/Coles and fill the online cart
 5. Order history: preferred products, and "you usually buy this every N weeks"
    suggestions
