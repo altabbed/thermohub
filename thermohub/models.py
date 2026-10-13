@@ -114,18 +114,46 @@ class CompareRequest(BaseModel):
     items: list[str] = Field(min_length=1, max_length=60)
 
 
-class Check(BaseModel):
-    ok: bool
-    detail: str
+ConnectionState = Literal["connected", "not_set_up", "needs_attention", "unavailable"]
 
 
-class StoreStatus(BaseModel):
-    id: StoreId
+class Connection(BaseModel):
+    """One account or service, described for the person using the page."""
+
+    id: Literal["cookidoo", "woolworths", "coles"]
     name: str
-    prices: Check
-    account: Check
+    state: ConnectionState = Field(
+        description="connected; not_set_up (nothing entered yet); needs_attention (the user "
+        "has to do something, e.g. sign in again); unavailable (not working right now, "
+        "nothing for the user to fix)."
+    )
+    summary: str = Field(description="One plain-language sentence about the state.")
+    detail: str | None = Field(default=None, description="Technical reason, when there is one.")
+    note: str | None = Field(default=None, description="Anything else worth knowing.")
 
 
 class Status(BaseModel):
-    cookidoo: Check
-    stores: list[StoreStatus]
+    connections: list[Connection]
+
+
+class Region(BaseModel):
+    country: str = Field(description="Cookidoo country code, e.g. au.")
+    language: str = Field(description="Cookidoo language, e.g. en-AU.")
+    site: str = Field(description="The Cookidoo website for this region.")
+
+
+class CookidooAccount(BaseModel):
+    signed_in: bool
+    email: str | None
+    country: str
+    language: str
+    automatic: bool = Field(
+        description="Signed in with details set in the container settings rather than the page."
+    )
+
+
+class SignInRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=1024)
+    country: str = Field(min_length=2, max_length=8)
+    language: str = Field(min_length=2, max_length=16)

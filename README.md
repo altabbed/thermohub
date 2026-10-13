@@ -11,7 +11,8 @@ as a Docker container on Unraid (or any Docker host) on your home network.
   ("3 brown onions"). Items you've ticked off in Cookidoo are left out.
 - Prices the items you pick at Woolworths and Coles and tells you which is
   cheaper, and what splitting the shop between them would cost.
-- Shows whether Cookidoo and each store's price lookups are working.
+- Shows, in plain language, whether Cookidoo, Woolworths and Coles are
+  connected, and lets you connect Cookidoo from a Settings page.
 
 Open `http://<host>:8000/`; it works on a phone too.
 
@@ -40,19 +41,19 @@ or Unraid won't be able to pull it.
      https://raw.githubusercontent.com/altabbed/thermohub/main/unraid/thermohub.xml
    ```
 
-2. **Docker → Add Container → Template: thermohub**.
-3. Fill in your Cookidoo email and password. Setting an **API key** is
-   recommended, since anything on your network can reach the container.
-4. **Apply**. Click the container icon → **WebUI** to open the shopping list
-   at `http://<unraid-ip>:8000/`. If you set an API key, the page asks for it
-   once and remembers it in that browser.
+2. **Docker → Add Container → Template: thermohub**, then **Apply**. Nothing
+   needs filling in. Optionally set an **Access key**; the page then asks for
+   it once per browser.
+3. Click the container icon → **WebUI** (or open `http://<unraid-ip>:8000/`).
+   The Home page walks you through connecting Cookidoo: pick your country and
+   enter the email and password you use for Cookidoo.
 
 The template defaults:
 
 - **Port:** 8000. Change the host port if something else (e.g. Portainer)
   already uses it.
-- **Appdata:** `/mnt/user/appdata/thermohub`. It only holds the Cookidoo login
-  tokens.
+- **Appdata:** `/mnt/user/appdata/thermohub`. It holds the Cookidoo sign-in
+  (tokens, your email and region), never your password.
 - **PUID/PGID:** 99/100 (`nobody:users`), the Unraid convention for appdata
   ownership.
 
@@ -62,40 +63,50 @@ Cookidoo session behind it.
 ## Run anywhere else with Docker Compose
 
 ```sh
-cp .env.example .env   # then fill in your Cookidoo email and password
 docker compose up -d --build
-curl http://localhost:8000/api/shopping-list
 ```
+
+Then open `http://localhost:8000/` and connect Cookidoo from the page. Copy
+`.env.example` to `.env` only if you want any of the optional settings below.
 
 ## Configuration
 
-All configuration is environment variables (or `.env` with Compose).
+Everything a person needs is on the Settings page. These environment variables
+(or `.env` with Compose) are all optional:
 
 | Variable | Default | |
 | --- | --- | --- |
-| `COOKIDOO_EMAIL` | (required) | Cookidoo login email |
-| `COOKIDOO_PASSWORD` | (required) | Cookidoo password |
-| `COOKIDOO_COUNTRY` | `au` | Cookidoo site country |
-| `COOKIDOO_LANGUAGE` | `en-AU` | Cookidoo site language |
-| `THERMOHUB_API_KEY` | (unset) | If set, `/api/*` requests need an `X-API-Key: <key>` header |
+| `THERMOHUB_API_KEY` | (unset) | Access key the page asks for once per browser; `/api/*` requests need it in an `X-API-Key` header |
+| `COOKIDOO_EMAIL` / `COOKIDOO_PASSWORD` | (unset) | Sign in to Cookidoo automatically with these, until someone signs out on the page |
+| `COOKIDOO_COUNTRY` / `COOKIDOO_LANGUAGE` | `au` / `en-AU` | Cookidoo site to use until one is picked on the page |
 | `PUID` / `PGID` | `99` / `100` | User and group the app runs as and that owns `/data` |
-| `THERMOHUB_DATA_DIR` | `/data` | Where the Cookidoo login tokens are stored |
+| `THERMOHUB_DATA_DIR` | `/data` | Where the Cookidoo sign-in is kept |
 
-On first use the service logs in with your email and password. It saves the
-resulting tokens to `/data/cookidoo_token.json` and refreshes them from then
-on, so restarts don't need a fresh password login.
+Connecting Cookidoo on the Settings page uses the password once, to sign in.
+Thermohub keeps the resulting tokens in `/data/cookidoo_token.json` (refreshed
+automatically) and the email and region in `/data/cookidoo_account.json`; the
+password itself is not stored. If Cookidoo ever ends the session, the Home
+page says so and asks you to sign in again.
 
 ## Web page
 
-`GET /` has three parts:
+Written for someone who isn't technical. Problems are explained in plain
+language, with the technical reason behind a **More info** link.
 
-- **Connections:** whether Cookidoo is signed in and whether Woolworths and
-  Coles price lookups work right now, with the reason when they don't. Store
-  accounts show "Not connected" until cart filling is built.
-- **Shopping list:** tick the items you want to price (or **Select all**).
-- **Woolworths vs Coles:** after **Compare prices**, which store is cheaper and
-  by how much, each store's total, the cost of splitting the shop, and every
+- **Home:** a card each for Cookidoo, Woolworths and Coles saying whether it's
+  connected, not set up yet, needs attention (for example, signed out), or not
+  working right now, with the button to fix it. The first time, a welcome
+  panel walks through connecting Cookidoo. Once connected, it shows how many
+  things are on your shopping list and a **Compare prices** button.
+- **Shopping list:** tick the items you want to price (or **Select all**),
+  then **Compare prices** to see which shop is cheaper and by how much, each
+  shop's total, the cost of buying each item wherever it's cheaper, and every
   item side by side with the cheaper one highlighted.
+- **Settings:** connect or sign out of Cookidoo (country, email, password),
+  see each store's status, and check all connections again.
+
+Woolworths and Coles don't need an account to compare prices; their account
+connection will come with cart filling.
 
 Each item is matched to the store's top search result. When that's the wrong
 product (loose onions instead of a 1 kg bag, say), pick another from the list
@@ -199,21 +210,36 @@ Errors from Cookidoo (bad password, Cookidoo down) return `502` with a
 ### `GET /api/status`
 
 Checks every connection live: Cookidoo (fetches the shopping list) and each
-store (searches for "milk"). Each check is `{"ok": bool, "detail": str}`.
+store (searches for "milk"). `state` is one of `connected`, `not_set_up`,
+`needs_attention` (the person has to do something, such as sign in again) or
+`unavailable` (not working right now, nothing for them to fix). `summary` is
+written for the person; `detail` is the technical reason.
 
 ```json
 {
-  "cookidoo": { "ok": true, "detail": "Signed in as you@example.com" },
-  "stores": [
-    {
-      "id": "woolworths",
-      "name": "Woolworths",
-      "prices": { "ok": true, "detail": "Price lookups working" },
-      "account": { "ok": false, "detail": "Only needed later, to fill your cart." }
-    }
+  "connections": [
+    { "id": "cookidoo", "name": "Cookidoo", "state": "connected",
+      "summary": "Connected as you@example.com", "detail": null, "note": null },
+    { "id": "coles", "name": "Coles", "state": "unavailable",
+      "summary": "Coles isn't letting Thermohub check prices right now.",
+      "detail": "Coles blocked the request (HTTP 403); its bot protection may be rejecting this server",
+      "note": "You don't need to sign in to Coles to compare prices." }
   ]
 }
 ```
+
+### Cookidoo account
+
+- `GET /api/cookidoo/account`: `signed_in`, `email`, `country`, `language`,
+  and `automatic` (signed in with the environment variables).
+- `GET /api/cookidoo/regions`: every Cookidoo site (`country`, `language`,
+  `site`).
+- `POST /api/cookidoo/sign-in` with `{"email", "password", "country",
+  "language"}`: signs in and returns the account. A wrong email or password is
+  a `400` with a plain-language `detail`.
+- `POST /api/cookidoo/sign-out`: forgets the sign-in.
+
+`GET /api/shopping-list` answers `409` while no Cookidoo account is connected.
 
 ### `POST /api/compare`
 
@@ -247,8 +273,8 @@ COOKIDOO_EMAIL=... COOKIDOO_PASSWORD=... THERMOHUB_DATA_DIR=./data \
 | Path | |
 | --- | --- |
 | `thermohub/main.py` | FastAPI app, routes, API-key check |
-| `thermohub/static/index.html` | The web page (plain HTML/JS, no build step) |
-| `thermohub/cookidoo_client.py` | Cookidoo login, token persistence, fetching the raw list |
+| `thermohub/static/` | The web page: `index.html`, `app.js`, `app.css` (plain HTML/JS, no build step) |
+| `thermohub/cookidoo_client.py` | Cookidoo sign-in and sign-out, saved sign-in, fetching the raw list |
 | `thermohub/shopping_list.py` | Merging the raw list into `ShoppingList` |
 | `thermohub/stores/` | Woolworths and Coles product search |
 | `thermohub/compare.py` | Pricing items at each store and totalling |
