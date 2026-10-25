@@ -214,10 +214,30 @@ async def _skip_heavy(route: Route) -> None:
         await route.continue_()
 
 
+# Words on a page that mean bot protection stopped it.
+BLOCKED_WORDS = re.compile(
+    r"access denied|pardon our interruption|incapsula incident|request unsuccessful"
+    r"|are you a robot|unusual (?:traffic|activity)|you have been blocked",
+    re.IGNORECASE,
+)
+
+
+async def blocked_text(page: Page) -> str | None:
+    """The bot-protection wording on the page, if it's showing any."""
+    try:
+        text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+        title = await page.title()
+    except PlaywrightError:
+        return None
+    found = BLOCKED_WORDS.search(text or "") or BLOCKED_WORDS.search(title or "")
+    return found.group(0) if found else None
+
+
 async def looks_signed_out(page: Page) -> bool:
+    """A quick look, for product pages: sent to a sign-in address, or a password box showing."""
     if _SIGNED_OUT_URL.search(page.url):
         return True
-    return await page.locator("input[type=password]").count() > 0
+    return await page.locator("input[type=password]:visible").count() > 0
 
 
 async def settle(page: Page, idle_ms: int = 8000) -> None:
@@ -298,8 +318,26 @@ async def check_signed_in(page: Page, site: StoreSite) -> bool:
                 await page.wait_for_load_state("domcontentloaded", timeout=15_000)
             except PlaywrightError:
                 pass
-    await page.wait_for_timeout(1500)  # let sign-in redirects finish
-    return not await looks_signed_out(page)
+    await settle(page)
+    return await sign_in_state(page) is True
+
+
+async def sign_in_state(page: Page) -> bool | None:
+    """On the shop's account page: signed in (True), signed out (False), or
+    can't tell (None) when bot protection is showing instead.
+
+    Signed out is a sign-in form showing, there or behind "My account" and
+    "Log in". The address alone can't be trusted: Woolworths' sign-in
+    address shows its home page.
+    """
+    if await blocked_text(page):
+        return None
+    if await has_login_form(page):
+        return False
+    await find_login_form(page)
+    if await has_login_form(page):
+        return False
+    return None if await blocked_text(page) else True
 
 
 # ---- Live sign-in ------------------------------------------------------------------

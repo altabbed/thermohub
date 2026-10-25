@@ -23,6 +23,7 @@ from thermohub.browser import (
     StoreSite,
     check_signed_in,
     fill_carts,
+    sign_in_state,
 )
 from thermohub.stores import Coles, StoreBlocked, Woolworths
 
@@ -53,6 +54,14 @@ HOME = """<!doctype html><title>Fakemart</title>
   document.getElementById("account").onclick = () => (menu.hidden = false);
 </script>"""
 
+SIGNED_IN_HOME = """<!doctype html><title>Fakemart</title>
+<header><button id="account">My account</button>
+<nav id="menu" hidden><a href="/orders">My orders</a> <a href="/logout">Log out</a></nav></header>
+<script>
+  const menu = document.getElementById("menu");
+  document.getElementById("account").onclick = () => (menu.hidden = false);
+</script>"""
+
 LOGIN = """<!doctype html><title>Sign in</title>
 <style>input { display: block; width: 300px; height: 40px }</style>
 <form method="post" action="/login">
@@ -70,6 +79,8 @@ class FakeMart:
         app.router.add_get("/home", self.home)
         app.router.add_post("/login", self.login)
         app.router.add_get("/account", self.account)
+        app.router.add_get("/myaccount", self.my_account)
+        app.router.add_get("/blocked", self.blocked)
         app.router.add_get("/product/{pid}", self.product)
         app.router.add_post("/cart/add/{pid}", self.add)
         self.server = TestServer(app)
@@ -104,6 +115,15 @@ class FakeMart:
         if request.cookies.get("session") != "ok":
             raise web.HTTPFound("/login")
         return web.Response(text="<h1>Your account</h1>", content_type="text/html")
+
+    async def my_account(self, request):
+        """Like Woolworths: signed out goes to the home page, not a sign-in address."""
+        if request.cookies.get("session") != "ok":
+            raise web.HTTPFound("/home")
+        return web.Response(text=SIGNED_IN_HOME, content_type="text/html")
+
+    async def blocked(self, request):
+        return web.Response(text="<h1>Access Denied</h1>", status=403, content_type="text/html")
 
     async def product(self, request):
         if request.cookies.get("session") != "ok":
@@ -416,3 +436,21 @@ async def test_without_a_browser_a_block_is_reported(shop):
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_sign_in_state_goes_by_the_form_not_the_address(browsers, mart):
+    """Woolworths sends signed-out visitors to its home page; only a sign-in
+    form behind "My account" shows they're signed out."""
+    page = await (await browsers.context("fakemart")).new_page()
+    await page.goto(mart.url("/myaccount"))
+    assert await sign_in_state(page) is False
+
+    await sign_in_with_cookie(browsers, mart)
+    page = await (await browsers.context("fakemart")).new_page()
+    await page.goto(mart.url("/myaccount"))
+    assert await sign_in_state(page) is True
+    assert page.url == mart.url("/myaccount")  # "Log out" is never tapped
+
+    await page.goto(mart.url("/blocked"))
+    assert await sign_in_state(page) is None

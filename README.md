@@ -163,7 +163,11 @@ tap targets, and no technical wording unless they open **Details**.
   when your account page appears.
 - **Settings:** your Cookidoo account (connect or sign out), and for each
   shop whether Thermohub is signed in (sign in or out) and whether prices
-  are working, with **Check again**.
+  are working, with **Check again**. Under **Something not working?**,
+  **Check Woolworths** and **Check Coles** try each step against the real
+  shop (search, search in Thermohub's browser, the sign-in page, signed
+  in?) and show what each step saw, with screenshots and a report to copy
+  and send.
 
 The headline totals compare like for like: only items both shops have.
 
@@ -175,6 +179,14 @@ person would: you sign in on the shop's own sign-in page (shown live in
 Thermohub, including any texted code), and Thermohub keeps that browser
 profile in `/data/browser/<shop>`, the way a browser stays signed in. Your
 password goes to the shop, not to Thermohub, which doesn't store it.
+
+Shops move their sign-in around: Woolworths' sign-in address now shows its
+home page, with the form behind **My account** and **Log in**. So when no
+sign-in form shows, Thermohub taps through those for you. Woolworths then
+asks for your email first and your password on the next page. **I've signed
+in** opens the shop's account page and looks for a sign-in form there (or
+behind **My account**): none means you're signed in. If the shop shows bot
+protection instead, Thermohub says it can't tell rather than guessing.
 
 To fill the cart, Thermohub opens each product's page in that browser and
 presses its **Add to cart** button, then steps the quantity up. This is the
@@ -205,9 +217,11 @@ To see exactly what Thermohub reads from a shop for some words, open
 Both sites block ordinary scripts, so requests go through
 [`curl_cffi`](https://github.com/lexiforest/curl_cffi), which looks like Chrome
 to the site, after first loading the home page like a browser would. Results
-are cached for 30 minutes. If a store starts blocking your server anyway, its
-card on the page turns red with the reason, and the comparison still shows the
-other store.
+are cached for 30 minutes. If a shop blocks those requests anyway (or answers
+with a page Thermohub can't read), Thermohub searches it in its own Chromium
+instead, the way the shop's website does, and keeps using the browser for
+that shop for 30 minutes. Only if that fails too does the shop's card turn red
+with the reason; the comparison still shows the other shop.
 
 ## API
 
@@ -383,6 +397,10 @@ remembered the same way.
   (`dy`), `back`, `restart`, `done` or `cancel`.
 - `GET /api/stores/{store}/search?q=…`: the products Thermohub reads from
   the shop's search for those words, in the shop's order.
+- `POST /api/stores/{store}/checks`: starts the shop checks and answers
+  `202` with `{"id", "store", "done", "checks"}`; `GET
+  /api/stores/{store}/checks/{id}` has the checks so far, each `{"name",
+  "ok", "summary", "facts", "screenshot"}`.
 - `POST /api/stores/{store}/sign-out`: forgets the shop sign-in.
 - `POST /api/carts` with `{"orders": [{"store", "lines": [{"product_id",
   "name", "url", "quantity", "key"}]}]}`: starts adding to the carts and
@@ -417,14 +435,19 @@ COOKIDOO_EMAIL=... COOKIDOO_PASSWORD=... THERMOHUB_DATA_DIR=./data \
 | `thermohub/stores/` | Woolworths and Coles product search |
 | `thermohub/compare.py` | Pricing items at each store and totalling |
 | `thermohub/smarts.py` | Pack counts, product matching, the pick, remembered choices |
-| `thermohub/browser.py` | Chromium for the shop sign-in (streamed to the page) and cart filling |
+| `thermohub/browser.py` | Chromium for the shop sign-in (streamed to the page), searching in the browser, and cart filling |
+| `thermohub/diagnose.py` | The shop checks, also as `python -m thermohub.diagnose` |
 | `thermohub/models.py` | Response models (also the OpenAPI schema) |
 | `unraid/thermohub.xml` | Unraid container template |
 
 `tests/test_browser.py` drives real Chromium against a small fake shop
 website. It uses `THERMOHUB_TEST_CHROMIUM` if set, else Playwright's own
 browser (`python -m playwright install chromium`). Inside the image,
-`python -m thermohub.browser` checks that Chromium starts.
+`python -m thermohub.browser` checks that Chromium starts, and
+`python -m thermohub.diagnose --deep --terms milk bananas` runs the shop
+checks against the real shops and prints the raw data they send
+(`--shots DIR` saves screenshots). The **Check the shops** workflow runs it
+on GitHub's servers whenever the store or browser code changes.
 
 `cookidoo-api` is pinned to an exact version on purpose. The library's public
 getters drop the ingredient id, unit and category, so `cookidoo_client.py`

@@ -22,23 +22,18 @@ from curl_cffi.requests import AsyncSession
 from playwright.async_api import Page
 
 from thermohub.browser import (
+    BLOCKED_WORDS,
     SITES,
     Browsers,
     StoreSite,
     find_login_form,
     has_login_form,
-    looks_signed_out,
     settle,
+    sign_in_state,
 )
 from thermohub.stores import Coles, Store, StoreError, Woolworths
 from thermohub.stores.base import IMPERSONATE
 
-# Words on a page that mean bot protection stopped it.
-_BLOCKED = re.compile(
-    r"access denied|pardon our interruption|incapsula|request unsuccessful|are you a robot"
-    r"|captcha|unusual (?:traffic|activity)|you have been blocked|forbidden",
-    re.IGNORECASE,
-)
 _FIELDS = """() => [...document.querySelectorAll('input, button')]
   .filter(e => e.offsetParent !== null)
   .slice(0, 12)
@@ -47,6 +42,18 @@ _FIELDS = """() => [...document.querySelectorAll('input, button')]
     e.name || e.id || e.getAttribute('aria-label') || (e.textContent || '').trim().slice(0, 30),
     e.autocomplete || '',
   ].join(' '))"""
+
+
+_NET_ERROR = re.compile(r"net::(ERR_[A-Z_]+)")
+
+
+def _reason(e: BaseException, site_name: str) -> str:
+    """The error in a sentence: a page that couldn't be reached says so plainly."""
+    text = str(e).splitlines()[0] if str(e) else type(e).__name__
+    network = _NET_ERROR.search(text)
+    if network:
+        return f"Couldn't open the {site_name} website from Thermohub ({network.group(1)})"
+    return text[:300]
 
 
 @dataclass
@@ -88,7 +95,7 @@ async def search_with_browser(store: Store, page: Page, term: str) -> Check:
     except Exception as e:
         facts = await _page_facts(page)
         facts["seconds"] = round(time.monotonic() - started, 1)
-        return Check(name, False, str(e).splitlines()[0][:300], facts, await _screenshot(page))
+        return Check(name, False, _reason(e, store.name), facts, await _screenshot(page))
     return Check(
         name,
         bool(products),
@@ -110,8 +117,7 @@ async def sign_in_page(site: StoreSite, page: Page) -> Check:
         tapped = await find_login_form(page)
         found = await has_login_form(page)
     except Exception as e:
-        reason = str(e).splitlines()[0][:200]
-        return Check(name, False, f"It didn't open: {reason}", await _page_facts(page))
+        return Check(name, False, _reason(e, site.name), await _page_facts(page))
     facts = await _page_facts(page)
     facts["status"] = response.status if response else None
     facts["opened_at"] = opened_at
@@ -134,21 +140,19 @@ async def account_page(site: StoreSite, page: Page) -> Check:
     try:
         await page.goto(site.account_url, wait_until="domcontentloaded", timeout=45_000)
         await settle(page)
+        opened_at = page.url
+        state = await sign_in_state(page)
     except Exception as e:
-        return Check(
-            name,
-            False,
-            f"The account page didn't open: {str(e).splitlines()[0][:200]}",
-            await _page_facts(page),
-        )
+        return Check(name, False, _reason(e, site.name), await _page_facts(page))
     facts = await _page_facts(page)
-    signed_out = await looks_signed_out(page)
-    facts["signed_in"] = not signed_out
-    if facts["blocked"]:
-        return Check(
-            name, False, f"The page says: “{facts['blocked']}”", facts, await _screenshot(page)
-        )
-    summary = "Signed in" if not signed_out else "Not signed in: the shop shows its sign-in page"
+    facts["opened_at"] = opened_at
+    facts["signed_in"] = state
+    if state is None:
+        summary = "Couldn't tell whether you're signed in"
+        if facts["blocked"]:
+            summary += f": the page says “{facts['blocked']}”"
+        return Check(name, False, summary, facts, await _screenshot(page))
+    summary = "Signed in" if state else "Not signed in: the shop shows its sign-in form"
     return Check(name, True, summary, facts, await _screenshot(page))
 
 
@@ -185,7 +189,7 @@ async def _page_facts(page: Page) -> dict[str, Any]:
     try:
         facts["title"] = await page.title()
         text = await page.evaluate("() => document.body ? document.body.innerText : ''")
-        found = _BLOCKED.search(text or "") or _BLOCKED.search(facts["title"])
+        found = BLOCKED_WORDS.search(text or "") or BLOCKED_WORDS.search(facts["title"])
         facts["blocked"] = found.group(0) if found else None
         facts["text"] = " ".join((text or "").split())[:300]
         facts["fields"] = await page.evaluate(_FIELDS)
