@@ -296,7 +296,7 @@ async def send_to_carts(
 
     def remember(order: CartOrder, line: CartLine) -> None:
         if line.key:
-            preferences.remember(order.store, line.key, line.product_id, line.name)
+            preferences.remember(order.store, line.key, line.product_id, line.name, line.quantity)
 
     task = asyncio.create_task(fill_carts(job, browsers, sites, remember))
     _running.add(task)
@@ -320,8 +320,13 @@ async def get_cart_job(
 async def remember_choice(
     request: ChoiceRequest, preferences: Annotated[Preferences, Depends(get_preferences)]
 ) -> None:
-    """Remember the product to pick for an ingredient at a store from now on."""
-    preferences.remember(request.store, request.key, request.product_id, request.name)
+    """Remember the product to pick for an ingredient at a store from now on.
+
+    `quantity` is remembered too, for items the recipes don't measure.
+    """
+    preferences.remember(
+        request.store, request.key, request.product_id, request.name, request.quantity
+    )
 
 
 async def _check_cookidoo(cookidoo: CookidooClient) -> Connection:

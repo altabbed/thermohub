@@ -15,8 +15,12 @@ as a Docker container on Unraid (or any Docker host) on your home network.
 - Lets you choose where to shop: everything at Woolworths, everything at
   Coles, or each item wherever it's cheaper, and move single items between
   shops.
-- Picks a sensible product for each ingredient (the one you chose last time,
-  else the cheapest real match) and remembers what you choose.
+- Shows every size and brand each shop has for an item, and picks one: the
+  one you chose last time; else the cheapest real match for the amount your
+  recipes need; else, for things recipes don't measure (toilet paper), the
+  best value per item or per kg. Both shops are priced for the same amount,
+  so 24 rolls are compared with 24 rolls. You can change the product and how
+  many, and Thermohub remembers both.
 - Sends the items to your Woolworths and/or Coles cart. You sign in to the
   shops once, on their own websites, inside Thermohub.
 - Shows, in plain language, whether Cookidoo, Woolworths and Coles are
@@ -116,12 +120,22 @@ tap targets, and no technical wording unless they open **Details**.
 - **Comparison:** one answer at the top ("Coles is cheaper, save $4.40"),
   then **Where do you want to shop?**: all at Woolworths, all at Coles, or
   (when it saves at least 50c) both shops, each item wherever it's cheaper,
-  each with its total. Below, every item shows the product it will be, how
-  many, and a Woolworths/Coles switch with both prices to move just that
-  item. **Choose a different product** lists the alternatives; the one you
-  pick is remembered for next time. Small labels explain the picks: *You
-  usually buy this*, *Best value* (lowest price per kg/L), *On special*, and
-  *Check this is right* when no product clearly matched.
+  each with its total. A shop missing items says which ("19 of 20 items.
+  No green curry paste."), and both shops is compared with the cheaper shop
+  on the items that shop has. Below, every item shows the product it will
+  be, its price per item or kg, a **How many** stepper, and a
+  Woolworths/Coles switch with both prices to move just that item.
+  **See all options** lists every size and brand, real matches first and
+  each priced for the same amount ("2 × $9.50"), then the shop's other
+  results. Small labels explain the picks: *You usually buy this*, *Best
+  value* (lowest price per item or kg), *On special*, and *Check this is
+  right* when no product clearly matched.
+- **Same amount, same product:** changing the product or how many at one
+  shop re-prices the other shop for the same amount, using the same brand
+  when it has it (Quilton at both, not Quilton against a house brand). When
+  a bigger size of the same product gets you the same for at least 50c less,
+  a tip says so ("The 24 pack gets you the same for $4.00 less") with a
+  **Switch** button.
 - **Send to cart:** the button at the bottom sends the basket. If a shop
   isn't signed in yet, it says **Sign in to Coles to send** and takes you
   there first. A progress screen ticks items off as they go into the cart,
@@ -137,6 +151,7 @@ tap targets, and no technical wording unless they open **Details**.
   are working, with **Check again**.
 
 The headline totals compare like for like: only items both shops have.
+Multi-buy deals ("2 for $10") aren't counted yet; the shelf price is.
 
 ### Signing in to the shops and filling the cart
 
@@ -161,7 +176,9 @@ upgrades.
 
 ## How prices are looked up
 
-- **Woolworths:** the JSON search API behind woolworths.com.au.
+- **Woolworths:** the JSON search API behind woolworths.com.au, a full page
+  of 36 results. Its results group a product's sizes (12, 24 and 36 packs)
+  into one tile; every size is kept.
 - **Coles:** the data embedded in coles.com.au search pages. Prices are for
   Coles' default store, which can differ a little from your local store.
 
@@ -298,20 +315,27 @@ free-text names ("350 g self-raising flour") are dropped from the search.
 `key` (default: made from the name) identifies the ingredient for remembered
 choices.
 
-For each item, `matches.<store>.candidates` holds up to six products, the
-pick first (name, size, price, was-price, unit price per kg/L/each, image,
-link), each with `packs`, `cost` (price × packs), `good_match` and `tags`
-(`usual`, `best_value`, `special`). The pick is the product remembered for
-that ingredient, else the cheapest good match for the amount needed, else the
-store's top result. `cheaper` names the store whose pick costs less.
+For each item, `matches.<store>.candidates` holds up to 24 products: the
+pick first, then real matches (best for the money first), then the store's
+other results. Each has the store's details (name, size, price, was-price,
+unit price, image, link) plus `packs`, `cost` (price × packs), `good_match`,
+`tags` (`usual`, `best_value`, `special`), `holds` (grams and/or a count,
+read from the size) and `value` (price per item or per kg/L, on the same
+basis for every candidate of the item). The pick is the product remembered
+for that ingredient (with last time's count, for unmeasured items); else the
+cheapest good match for the amount needed; else, when there's no amount, the
+best-value good match; else the store's top result. `amount` is the amount
+priced at every store: the recipes' need or, when they don't say, what the
+usual or best-value pick holds. `cheaper` names the store whose pick costs
+less.
 `totals`, `split_total` and `cheapest` summarise the picks for the
 `compared` items that every store has. A store that couldn't be searched sets
 `matches.<store>.error`.
 
-`POST /api/choices` with `{"store", "key", "product_id", "name"}` remembers a
-product as the pick for that ingredient at that store
-(`/data/preferences.json`). Products that make it into a cart are remembered
-the same way.
+`POST /api/choices` with `{"store", "key", "product_id", "name", "quantity"}`
+remembers a product (and how many) as the pick for that ingredient at that
+store (`/data/preferences.json`). Products that make it into a cart are
+remembered the same way.
 
 ### Shops and carts
 

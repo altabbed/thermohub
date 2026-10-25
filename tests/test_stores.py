@@ -60,6 +60,30 @@ def test_parse_woolworths():
     assert garlic.unit_price.text == "$10.00 / 1KG"
 
 
+def test_parse_woolworths_keeps_every_size():
+    def tissue(stockcode, rolls, price):
+        return woolworths_product(
+            stockcode,
+            "Quilton Toilet Tissue 3 Ply",
+            price,
+            size=f"{rolls} pack",
+            cup=(round(price / rolls, 2), "1EA"),
+        )
+
+    products = parse_search(
+        woolworths_search(
+            [tissue(1, 12, 9.50), tissue(2, 24, 14.00), tissue(3, 36, 20.00)],
+            tissue(2, 24, 14.00),  # the same product again in another tile
+        )
+    )
+
+    assert [(p.id, p.size) for p in products] == [
+        ("1", "12 pack"),
+        ("2", "24 pack"),
+        ("3", "36 pack"),
+    ]
+
+
 def test_parse_coles():
     products = parse_results(
         [

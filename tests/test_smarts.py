@@ -4,11 +4,13 @@ from thermohub.models import Quantity, StoreProduct, UnitPrice
 from thermohub.smarts import (
     Preferences,
     choose,
+    common_amount,
     good_match,
     holds,
     item_key,
     need,
     packs_needed,
+    value_basis,
 )
 
 
@@ -80,7 +82,10 @@ def test_packs_needed(needs, size, packs):
         ("onion", "Onion Rings", False),
         ("green curry paste", "Valcom Green Curry Paste", True),
         ("bananas", "Cavendish Bananas", True),
-        ("toilet paper", "Quilton Toilet Tissue", False),
+        ("toilet paper", "Quilton Toilet Tissue 3 Ply", True),
+        ("toilet paper", "Sorbent Toilet Paper", True),
+        ("toilet paper", "Viva Paper Towel", False),
+        ("toilet paper", "Harpic Toilet Cleaner", False),
     ],
 )
 def test_good_match(ingredient, name, ok):
@@ -102,9 +107,86 @@ def test_choose_prefers_cheapest_real_match_for_the_amount():
 
 
 def test_choose_falls_back_to_the_store_order():
-    products = [product("a", "Quilton Toilet Tissue", 9.50), product("b", "Kleenex Tissue", 8.0)]
+    products = [product("a", "Finish Quantum Ultimate", 20.0), product("b", "Fairy Platinum", 18.0)]
 
-    assert choose("toilet paper", {}, products)[0].id == "a"
+    assert choose("dishwasher tablets", {}, products)[0].id == "a"
+
+
+def toilet_paper(pid, rolls, price, brand="Quilton Toilet Tissue 3 Ply"):
+    return product(pid, f"{brand} {rolls} Pack", price, f"{rolls} pack")
+
+
+def test_choose_best_value_when_the_recipes_dont_say_how_much():
+    products = [
+        toilet_paper("12", 12, 9.50),
+        toilet_paper("24", 24, 14.00),
+        toilet_paper("36", 36, 20.00),
+    ]
+
+    ranked = choose("toilet paper", {}, products)
+
+    assert [c.id for c in ranked] == ["36", "24", "12"]
+    assert ranked[0].tags == ["best_value"]
+    assert ranked[0].value.text == "$0.56 each"
+    assert ranked[0].holds == {"count": 36}
+    assert (ranked[0].packs, ranked[0].cost) == (1, 20.00)
+
+
+def test_choose_for_an_amount_compares_the_cost_of_that_amount():
+    products = [
+        toilet_paper("12", 12, 9.50),
+        toilet_paper("24", 24, 14.00),
+        toilet_paper("36", 36, 20.00),
+    ]
+
+    ranked = choose("toilet paper", {"count": 24}, products)
+
+    assert [(c.id, c.packs, c.cost) for c in ranked] == [
+        ("24", 1, 14.00),
+        ("12", 2, 19.00),
+        ("36", 1, 20.00),
+    ]
+
+
+def test_choose_remembers_how_many_for_unmeasured_items():
+    products = [toilet_paper("12", 12, 9.50), toilet_paper("24", 24, 14.00)]
+
+    pick = choose("toilet paper", {}, products, usual="12", usual_packs=2)[0]
+    assert (pick.id, pick.packs, pick.cost, pick.tags) == ("12", 2, 19.00, ["usual"])
+    # A recipe amount wins over last time's count.
+    pick = choose("toilet paper", {"count": 12}, products, usual="12", usual_packs=2)[0]
+    assert (pick.id, pick.packs) == ("12", 1)
+
+
+@pytest.mark.parametrize(
+    ("needs", "sizes", "basis"),
+    [
+        ({}, ["12 pack", "24 pack", "1kg"], "count"),
+        ({}, ["1kg", "each", "2kg"], "mass"),
+        ({"mass": 800}, ["12 pack", "24 pack"], "mass"),
+        ({"count": 3}, ["1kg", "2kg"], "count"),
+    ],
+)
+def test_value_basis(needs, sizes, basis):
+    assert value_basis(needs, [product(str(i), "x", 1.0, s) for i, s in enumerate(sizes)]) == basis
+
+
+def test_common_amount_is_the_best_value_pick():
+    woolworths = choose("toilet paper", {}, [toilet_paper("w36", 36, 20.00)])[0]
+    coles = choose("toilet paper", {}, [toilet_paper("c24", 24, 13.00)])[0]
+
+    assert common_amount([woolworths, coles]) == {"count": 24}  # Coles' 54c a roll beats 56c
+
+
+def test_common_amount_follows_the_usual_pick():
+    usual = choose("toilet paper", {}, [toilet_paper("12", 12, 9.5)], usual="12", usual_packs=2)[0]
+    other = choose("toilet paper", {}, [toilet_paper("c36", 36, 15.00)])[0]
+
+    assert common_amount([other, usual]) == {"count": 24}
+
+
+def test_common_amount_unknown():
+    assert common_amount(choose("milk", {}, [product("m", "Milk", 3.0)])) == {}
 
 
 def test_choose_tags():
@@ -130,6 +212,9 @@ def test_item_key():
 def test_preferences_survive_a_restart(tmp_path):
     path = tmp_path / "data" / "preferences.json"
     Preferences(path).remember("coles", "ref:x", "123", "Coles Milk")
+    Preferences(path).remember("coles", "name:toilet paper", "tp", "Quilton", packs=2)
 
     assert Preferences(path).usual("coles", "ref:x") == "123"
+    assert Preferences(path).usual_packs("coles", "ref:x") is None
     assert Preferences(path).usual("woolworths", "ref:x") is None
+    assert Preferences(path).usual_packs("coles", "name:toilet paper") == 2

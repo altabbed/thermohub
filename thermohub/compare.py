@@ -3,16 +3,31 @@
 import asyncio
 from collections.abc import Sequence
 import re
+from typing import NamedTuple
 
 from thermohub.models import (
+    Amount,
     CompareItem,
     CompareRequestItem,
     Comparison,
     StoreId,
     StoreMatch,
+    StoreProduct,
     StoreTotal,
 )
-from thermohub.smarts import Preferences, choose, item_key, need
+from thermohub.smarts import (
+    COUNT,
+    MASS,
+    PACK,
+    POOL,
+    Preferences,
+    choose,
+    common_amount,
+    good_match,
+    item_key,
+    need,
+    value_basis,
+)
 from thermohub.stores import Store, StoreError
 
 # Ingredients of user-created recipes are free text such as "350 g self-raising
@@ -36,32 +51,76 @@ async def compare(
     stores: Sequence[Store],
     preferences: Preferences | None = None,
 ) -> Comparison:
-    async def match(store: Store, item: CompareRequestItem, key: str) -> StoreMatch:
+    async def search(store: Store, item: CompareRequestItem) -> _Found:
         term = search_term(item.name)
         try:
-            products = await store.search(term)
+            return _Found(term, await store.search(term))
         except StoreError as e:
-            return StoreMatch(search_term=term, candidates=[], error=str(e))
-        usual = preferences.usual(store.id, key) if preferences else None
-        return StoreMatch(
-            search_term=term, candidates=choose(term, need(item.quantities), products, usual)
-        )
+            return _Found(term, [], str(e))
 
-    keys = [item.key or item_key(item.name) for item in items]
-    matches = await asyncio.gather(
-        *(
-            match(store, item, key)
-            for item, key in zip(items, keys, strict=True)
-            for store in stores
-        )
-    )
+    found = await asyncio.gather(*(search(store, item) for item in items for store in stores))
     compared = []
     for i, item in enumerate(items):
-        by_store = {store.id: matches[i * len(stores) + j] for j, store in enumerate(stores)}
+        key = item.key or item_key(item.name)
+        results = {store.id: found[i * len(stores) + j] for j, store in enumerate(stores)}
+
+        needs = need(item.quantities)
+        by_store = _pick(results, needs, key, preferences)
+        if not needs:
+            # Nothing measured (toilet paper): price the same amount at every store.
+            needs = common_amount([m.candidates[0] for m in by_store.values() if m.candidates])
+            if needs:
+                by_store = _pick(results, needs, key, preferences)
         compared.append(
-            CompareItem(name=item.name, key=keys[i], matches=by_store, cheaper=_cheaper(by_store))
+            CompareItem(
+                name=item.name,
+                key=key,
+                amount=_amount(needs),
+                matches=by_store,
+                cheaper=_cheaper(by_store),
+            )
         )
     return summarise(compared, [store.id for store in stores])
+
+
+class _Found(NamedTuple):
+    term: str
+    products: list[StoreProduct]
+    error: str | None = None
+
+
+def _pick(
+    results: dict[StoreId, _Found],
+    needs: dict[str, float],
+    key: str,
+    preferences: Preferences | None,
+) -> dict[StoreId, StoreMatch]:
+    # Value is judged on one basis (per item or per kg) at every store.
+    term = next(iter(results.values())).term
+    pooled = [p for r in results.values() for p in r.products[:POOL]]
+    basis = value_basis(needs, [p for p in pooled if good_match(term, p.name)] or pooled)
+    return {
+        store_id: StoreMatch(
+            search_term=r.term,
+            candidates=choose(
+                r.term,
+                needs,
+                r.products,
+                preferences.usual(store_id, key) if preferences else None,
+                preferences.usual_packs(store_id, key) if preferences else None,
+                basis,
+            ),
+            error=r.error,
+        )
+        for store_id, r in results.items()
+    }
+
+
+def _amount(needs: dict[str, float]) -> Amount | None:
+    for kind in (MASS, COUNT, PACK):
+        if kind in needs:
+            return Amount(kind=kind, value=round(needs[kind], 3))  # type: ignore[arg-type]
+    return None
 
 
 def summarise(items: list[CompareItem], store_ids: list[StoreId]) -> Comparison:

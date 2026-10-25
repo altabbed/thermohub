@@ -26,7 +26,8 @@ class Woolworths(Store):
             json={
                 "searchTerm": term,
                 "pageNumber": 1,
-                "pageSize": 24,
+                # A full page, so every size and brand of the item is there to choose from.
+                "pageSize": 36,
                 "sortType": "TraderRelevance",
                 "isSpecial": False,
                 "isBundle": False,
@@ -50,12 +51,16 @@ class Woolworths(Store):
 
 def parse_search(data: Mapping[str, Any]) -> list[StoreProduct]:
     products = []
-    for raw in _tiles(data):
+    seen = set()
+    for raw in _products(data):
         price = raw.get("Price")
+        stockcode = raw.get("Stockcode")
         if not raw.get("IsAvailable", True) or not isinstance(price, int | float) or price <= 0:
             continue
+        if stockcode in seen:
+            continue
+        seen.add(stockcode)
         was = raw.get("WasPrice")
-        stockcode = raw.get("Stockcode")
         products.append(
             StoreProduct(
                 store="woolworths",
@@ -75,17 +80,18 @@ def parse_search(data: Mapping[str, Any]) -> list[StoreProduct]:
     return products
 
 
-def _tiles(data: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
-    """The product shown on each search result tile.
+def _products(data: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
+    """Every product in the results, size variants included.
 
     Results come grouped: each entry of ``Products`` is a tile holding its
-    own ``Products`` list (the product plus any size variants).
+    own ``Products`` list, the product shown plus its other sizes (the 12,
+    24 and 36 packs of the same toilet paper).
     """
     for group in data.get("Products") or []:
         if not isinstance(group, Mapping):
             continue
         inner = group.get("Products")
-        if isinstance(inner, list) and inner and isinstance(inner[0], Mapping):
-            yield inner[0]
+        if isinstance(inner, list):
+            yield from (p for p in inner if isinstance(p, Mapping))
         elif "Stockcode" in group:
             yield group

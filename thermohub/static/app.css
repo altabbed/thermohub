@@ -265,6 +265,18 @@ a.pname:hover { text-decoration: underline; }
 .tag.value, .tag.special { background: var(--save-soft); color: var(--save-ink); }
 .tag.check { background: var(--warn-soft); color: var(--warn); }
 
+/* How many */
+.qty-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.qty-label { color: var(--ink-soft); font-size: 0.95rem; font-weight: 600; }
+.stepper { display: inline-flex; align-items: center; border: 1.5px solid var(--line); border-radius: 12px; background: var(--surface); }
+.stepper button { width: 44px; height: 40px; border: 0; background: none; cursor: pointer; display: grid; place-items: center; color: var(--ink); border-radius: 10px; }
+.stepper button:hover:not(:disabled) { background: var(--sunk); }
+.stepper button:disabled { color: var(--line); cursor: default; }
+.stepper-n { min-width: 2ch; text-align: center; font-weight: 800; font-variant-numeric: tabular-nums; }
+.tip-line { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; align-items: start; padding: 10px 12px; border-radius: 12px; background: var(--save-soft); color: var(--save-ink); font-size: 0.9rem; font-weight: 600; }
+.tip-line .icon { color: var(--save); margin-top: 2px; }
+.tip-line .button { grid-column: 2; justify-self: start; }
+
 /* Which shop, for one item */
 .switch { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 4px; border-radius: 14px; background: var(--sunk); }
 .switch button {
@@ -290,7 +302,10 @@ a.pname:hover { text-decoration: underline; }
 .choice.on { border: 2px solid var(--ink); padding: 9.5px 11.5px; }
 .choice-text { display: grid; gap: 2px; min-width: 0; }
 .choice-text .tags { margin-top: 4px; }
-.choice-cost { font-weight: 800; font-variant-numeric: tabular-nums; }
+.choice-cost { font-weight: 800; font-variant-numeric: tabular-nums; display: grid; justify-items: end; white-space: nowrap; }
+.choice-times { font-size: 0.8rem; font-weight: 600; color: var(--ink-soft); }
+.choices-label { font-size: 0.8rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); margin-top: 6px; }
+.choices > .button { justify-self: start; }
 
 /* Sending to the carts */
 .button.split { justify-content: space-between; }

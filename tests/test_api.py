@@ -297,7 +297,13 @@ def test_compare_with_quantities_and_remembered_choice(tmp_path):
     assert (
         client.post(
             "/api/choices",
-            json={"store": "coles", "key": "ref:milk", "product_id": "c-milk", "name": "Milk"},
+            json={
+                "store": "coles",
+                "key": "ref:milk",
+                "product_id": "c-milk",
+                "name": "Milk",
+                "quantity": 3,
+            },
         ).status_code
         == 204
     )
@@ -306,6 +312,7 @@ def test_compare_with_quantities_and_remembered_choice(tmp_path):
     coles = body["items"][0]["matches"]["coles"]["candidates"][0]
     assert coles["tags"] == ["usual"]
     assert preferences.usual("coles", "ref:milk") == "c-milk"
+    assert preferences.usual_packs("coles", "ref:milk") == 3
 
 
 def test_compare_needs_items():
@@ -394,8 +401,9 @@ def test_send_to_carts(fake_fill, tmp_path):
     assert progress["orders"][0]["state"] == "done"
     assert progress["orders"][0]["cart_url"] == "https://www.woolworths.com.au/shop/cart"
     assert progress["orders"][0]["lines"][0]["status"] == "added"
-    # What went into the cart becomes the usual pick.
+    # What went into the cart becomes the usual pick, and how many.
     assert preferences.usual("woolworths", "ref:milk") == "w-milk"
+    assert preferences.usual_packs("woolworths", "ref:milk") == 2
 
 
 @pytest.mark.parametrize(

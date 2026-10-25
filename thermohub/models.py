@@ -96,6 +96,16 @@ class Candidate(StoreProduct):
         description="usual: picked last time; best_value: lowest price per kg/L/each among "
         "real matches; special: on special.",
     )
+    holds: dict[Literal["mass", "count"], float] = Field(
+        default_factory=dict,
+        description="What one holds, read from its size: grams (or ml) and/or a count "
+        "(24 for a 24 pack).",
+    )
+    value: UnitPrice | None = Field(
+        default=None,
+        description="Price per each or per kg/L, the same basis for every candidate of the "
+        "item, so they can be compared for value.",
+    )
 
 
 class StoreMatch(BaseModel):
@@ -104,9 +114,21 @@ class StoreMatch(BaseModel):
     error: str | None = Field(default=None, description="Why the search failed, if it did.")
 
 
+class Amount(BaseModel):
+    kind: Literal["mass", "count", "pack"] = Field(
+        description="mass: grams (ml count as grams); count: items; pack: tins, jars and such."
+    )
+    value: float
+
+
 class CompareItem(BaseModel):
     name: str
     key: str = Field(description="Stable key for the ingredient, used to remember choices.")
+    amount: Amount | None = Field(
+        default=None,
+        description="The amount priced at every store: what the recipes need, or when they "
+        "don't say, what the usual or best-value product holds. Null when unknown.",
+    )
     matches: dict[StoreId, StoreMatch]
     cheaper: StoreId | None = Field(
         description="Store whose pick costs less; null on a tie or if either is missing."
@@ -154,6 +176,9 @@ class ChoiceRequest(BaseModel):
     key: str = Field(min_length=1, max_length=300)
     product_id: str = Field(min_length=1, max_length=64)
     name: str = Field(max_length=300)
+    quantity: int | None = Field(
+        default=None, ge=1, le=24, description="How many, for items the recipes don't measure."
+    )
 
 
 ConnectionState = Literal["connected", "not_set_up", "needs_attention", "unavailable"]

@@ -23,6 +23,7 @@ const ICONS = {
   star: '<path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/>',
   warn: '<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17.5v.01"/>',
   minus: '<path d="M7 12h10"/>',
+  plus: '<path d="M12 7v10M7 12h10"/>',
   circle: '<circle cx="12" cy="12" r="7"/>',
   open: '<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
 };
@@ -70,8 +71,9 @@ function listOf(words) {
 
 function photo(url) {
   const blank = () => el("span", { class: "noimg" });
-  if (!safeUrl(url)) return blank();
-  const img = el("img", { src: url, alt: "", loading: "lazy" });
+  if (!safeUrl(url) && !/^data:image\//.test(url || "")) return blank();
+  // No referrer: the shops' image servers needn't see Thermohub's address.
+  const img = el("img", { referrerPolicy: "no-referrer", loading: "lazy", alt: "", src: url });
   img.addEventListener("error", () => img.replaceWith(blank()));
   return img;
 }
@@ -122,6 +124,10 @@ const data = {
   compareError: null,
   compared: [], // the shopping list items behind each comparison row
   picks: [], // per item, per shop: which candidate is chosen
+  qty: [], // per item, per shop: how many of it, once changed here
+  amount: [], // per item: the amount priced at both shops, {kind, value}
+  chosen: [], // per item: the shops where a product was picked by hand
+  showAll: new Set(), // items whose full list of options is open
   plan: null, // "woolworths", "coles" or "split"
   storeFor: [], // per item: a shop chosen by hand, overriding the plan
   open: new Set(),
@@ -433,6 +439,10 @@ function startComparison() {
       data.comparison = comparison;
       data.compared = items;
       data.picks = comparison.items.map(() => ({}));
+      data.qty = comparison.items.map(() => ({}));
+      data.amount = comparison.items.map((item) => item.amount);
+      data.chosen = comparison.items.map(() => new Set());
+      data.showAll = new Set();
       data.storeFor = comparison.items.map(() => null);
       data.plan = defaultPlan(comparison);
     })
@@ -481,10 +491,155 @@ function pick(i, storeId) {
   return match ? match.candidates[data.picks[i][storeId] || 0] || null : null;
 }
 
+const round2 = (n) => Math.round(n * 100) / 100;
+
+// How many of the picked product, and what they cost.
+function qty(i, storeId) {
+  const p = pick(i, storeId);
+  return data.qty[i][storeId] || (p ? p.packs : 1);
+}
+
+function cost(i, storeId) {
+  const p = pick(i, storeId);
+  return p ? round2(p.price * qty(i, storeId)) : null;
+}
+
+// How many of a product cover an amount (null when its size can't be read).
+function coverPacks(cand, amount) {
+  if (!amount) return null;
+  const per = amount.kind === "pack" ? (cand.holds.mass && cand.holds.count ? cand.holds.count : 1) : cand.holds[amount.kind];
+  if (!per) return null;
+  return Math.min(24, Math.max(1, Math.ceil(amount.value / per - 1e-9)));
+}
+
+// How much a product delivers when bought n times, in the item's amount kind.
+function delivers(cand, n, kind) {
+  if (kind === "pack") return (cand.holds.mass && cand.holds.count ? cand.holds.count : 1) * n;
+  return cand.holds[kind] ? cand.holds[kind] * n : null;
+}
+
+function amountKind(i, cand) {
+  const amount = data.amount[i];
+  if (amount) return amount.kind;
+  return cand.holds.count ? "count" : cand.holds.mass ? "mass" : null;
+}
+
+// Packs of a product for the item's current amount: Thermohub's own count
+// until the amount changes on this page. Results that aren't the item
+// (paper towel for toilet paper) are one, at shelf price.
+function packsFor(i, cand) {
+  if (!cand.good_match && cand !== data.comparison.items[i].matches[cand.store].candidates[0]) return 1;
+  const amount = data.amount[i];
+  const original = data.comparison.items[i].amount;
+  if (!amount || (original && amount.kind === original.kind && amount.value === original.value)) return cand.packs;
+  return coverPacks(cand, amount) || 1;
+}
+
+// The product without its size: "Quilton Toilet Tissue 3 Ply 12 Pack" -> "quilton toilet tissue 3 ply".
+const productLine = (name) => name.toLowerCase()
+  .replace(/\b\d+(\.\d+)?\s*(x\s*\d+(\.\d+)?\s*)?(pack|pk|kg|g|ml|l|ea|each|ct)\b/g, " ")
+  .replace(/\s+/g, " ").trim();
+
+// The same brand and product, perhaps worded a little differently by each shop.
+function sameLine(a, b) {
+  const [x, y] = [productLine(a.name).split(" "), productLine(b.name).split(" ")];
+  if (x[0] !== y[0]) return false;
+  const [xs, ys] = [new Set(x), new Set(y)];
+  const both = [...xs].filter((w) => ys.has(w)).length;
+  return both / (xs.size + ys.size - both) >= 0.75;
+}
+
+// After a change at one shop, price the same amount at the other: the
+// product picked there by hand in more or fewer packs; otherwise the same
+// product as here if that shop has it, else its cheapest real match.
+function retarget(i, from) {
+  const amount = data.amount[i];
+  const source = pick(i, from);
+  if (!amount || !source) return;
+  for (const store of STORES) {
+    const current = store.id !== from && pick(i, store.id);
+    if (!current) continue;
+    const keep = (data.chosen[i].has(store.id) || current.tags.includes("usual")) && coverPacks(current, amount);
+    if (keep) {
+      data.qty[i][store.id] = keep;
+      continue;
+    }
+    const options = data.comparison.items[i].matches[store.id].candidates
+      .map((c, j) => ({ c, j, n: c.good_match && coverPacks(c, amount) }))
+      .filter((o) => o.n);
+    const same = options.filter((o) => sameLine(o.c, source));
+    let best = null;
+    (same.length ? same : options).forEach(({ c, j, n }) => {
+      if (!best || c.price * n < best.cost - 0.001) best = { j, n, cost: c.price * n };
+    });
+    if (best) {
+      data.picks[i][store.id] = best.j;
+      data.qty[i][store.id] = best.n;
+    } else {
+      data.qty[i][store.id] = coverPacks(current, amount) || qty(i, store.id);
+    }
+  }
+}
+
+function selectProduct(i, storeId, j) {
+  data.picks[i][storeId] = j;
+  data.chosen[i].add(storeId);
+  const cand = pick(i, storeId);
+  const n = packsFor(i, cand);
+  data.qty[i][storeId] = n;
+  // A bigger pack than needed means more of it: price that much at the other shop too.
+  const kind = amountKind(i, cand);
+  const got = kind && delivers(cand, n, kind);
+  if (got && (!data.amount[i] || got > data.amount[i].value + 1e-9)) data.amount[i] = { kind, value: got };
+  retarget(i, storeId);
+  remember(i, storeId);
+}
+
+function setQty(i, storeId, n) {
+  const cand = pick(i, storeId);
+  data.qty[i][storeId] = n;
+  data.chosen[i].add(storeId);
+  const kind = amountKind(i, cand);
+  const got = kind && delivers(cand, n, kind);
+  if (got) {
+    data.amount[i] = { kind, value: got };
+    retarget(i, storeId);
+  }
+  remember(i, storeId);
+}
+
+// Remember the product and how many, so Thermohub picks them first next time.
+const rememberLater = {};
+function remember(i, storeId) {
+  const item = data.comparison.items[i];
+  const p = pick(i, storeId);
+  const id = `${i}:${storeId}`;
+  clearTimeout(rememberLater[id]);
+  rememberLater[id] = setTimeout(() => {
+    const body = { store: storeId, key: item.key, product_id: p.id, name: p.name, quantity: qty(i, storeId) };
+    api("choices", { method: "POST", body: JSON.stringify(body) }).catch(failed);
+  }, 800);
+}
+
+// Another size of the same product that gets the same amount for at least
+// 50c less: one 24 pack instead of two 12 packs.
+function cheaperSameAmount(i, storeId) {
+  const amount = data.amount[i];
+  const current = pick(i, storeId);
+  if (!amount || !current) return null;
+  let best = null;
+  data.comparison.items[i].matches[storeId].candidates.forEach((c, j) => {
+    const n = c.good_match && sameLine(c, current) && coverPacks(c, amount);
+    if (n && (!best || c.price * n < best.cost - 0.001)) best = { j, n, cost: round2(c.price * n), cand: c };
+  });
+  if (!best || best.cand.id === current.id || cost(i, storeId) - best.cost < 0.5) return null;
+  return best;
+}
+
 function cheaperAt(i) {
-  const [a, b] = STORES.map((s) => pick(i, s.id));
-  if (!a || !b || Math.abs(a.cost - b.cost) < 0.005) return null;
-  return a.cost < b.cost ? STORES[0].id : STORES[1].id;
+  const [a, b] = STORES.map((s) => cost(i, s.id));
+  if (a === null || b === null || Math.abs(a - b) < 0.005) return null;
+  return a < b ? STORES[0].id : STORES[1].id;
 }
 
 // Where an item is bought under a plan: everything at one shop (leaving out
@@ -505,14 +660,15 @@ function planTotal(plan) {
   let total = 0;
   let count = 0;
   const shops = new Set();
-  data.comparison.items.forEach((_, i) => {
+  const missing = [];
+  data.comparison.items.forEach((item, i) => {
     const s = planStore(i, plan);
-    if (!s) return;
-    total += pick(i, s).cost;
+    if (!s) return missing.push(item.name);
+    total += cost(i, s);
     count++;
     shops.add(s);
   });
-  return { total, count, shops };
+  return { total, count, shops, missing };
 }
 
 // What will actually be bought, by shop.
@@ -522,9 +678,8 @@ function basket() {
   data.comparison.items.forEach((item, i) => {
     const s = storeFor(i);
     if (!s) return;
-    const p = pick(i, s);
-    orders[s].push({ item, p });
-    total += p.cost;
+    orders[s].push({ item, p: pick(i, s), n: qty(i, s) });
+    total += cost(i, s);
   });
   const shops = STORES.filter((s) => orders[s.id].length);
   return { orders, total, shops, count: shops.reduce((n, s) => n + orders[s.id].length, 0) };
@@ -536,11 +691,11 @@ function summarise() {
   const found = Object.fromEntries(STORES.map((s) => [s.id, 0]));
   let compared = 0;
   data.comparison.items.forEach((_, i) => {
-    const picks = STORES.map((s) => pick(i, s.id));
-    STORES.forEach((s, j) => picks[j] && found[s.id]++);
-    if (picks.every(Boolean)) {
+    const costs = STORES.map((s) => cost(i, s.id));
+    STORES.forEach((s, j) => costs[j] !== null && found[s.id]++);
+    if (costs.every((c) => c !== null)) {
       compared++;
-      STORES.forEach((s, j) => (totals[s.id] += picks[j].cost));
+      STORES.forEach((s, j) => (totals[s.id] += costs[j]));
     }
   });
   return { totals, found, compared };
@@ -592,34 +747,54 @@ function drawComparison(body) {
     anything ? planPicker(redraw, winner) : null,
     el("p", { class: "section-label" }, "Your items"),
     el("ul", { class: "card rows" }, c.items.map((item, i) => itemRow(item, i, redraw))),
-    el("p", { class: "note" }, "Thermohub picks products that match each ingredient, in the amount your recipes need, and remembers the ones you choose."));
+    el("p", { class: "note" }, "Thermohub picks products that match each ingredient: the cheapest for the amount your recipes need, or the best value per item or kilo when they don't say. Both shops are priced for the same amount, and your choices are remembered."));
   sendAction();
 }
 
 // -- Where to shop: one shop, or each item wherever it's cheaper --
 
+function namesOf(names, most = 2) {
+  const shown = names.slice(0, most).map((n) => n.toLowerCase());
+  return names.length > most ? `${shown.join(", ")} and ${plural(names.length - most, "other")}` : listOf(shown);
+}
+
 function planPicker(redraw, winner) {
   const count = data.comparison.items.length;
-  const single = STORES.map((s) => ({ id: s.id, total: planTotal(s.id) }));
+  const single = STORES.map((s) => ({ store: s, total: planTotal(s.id) }));
   const split = planTotal("split");
-  const best = single.filter((o) => o.total.count === split.count).sort((x, y) => x.total.total - y.total.total)[0];
-  const splitSaves = best ? best.total.total - split.total : 0;
-  const options = single.map(({ id, total }) => {
-    const store = storeById(id);
-    return {
-      id,
-      label: [storeDot(id), store.name],
-      sub: total.count === count ? `All ${plural(count, "item")}` : `${total.count} of ${count} items`,
-      total,
-      badge: winner && winner.id === id ? "Cheaper" : null,
-    };
+  const options = single.map(({ store, total }) => ({
+    id: store.id,
+    label: [storeDot(store.id), store.name],
+    sub: total.missing.length
+      ? `${total.count} of ${count} items. No ${namesOf(total.missing)}.`
+      : `All ${plural(count, "item")}`,
+    total,
+    badge: winner && winner.id === store.id ? "Cheaper" : null,
+  }));
+
+  // Both shops, compared fairly with the cheaper shop: on the items that shop has.
+  const ref = winner || [...single].sort((x, y) => y.total.count - x.total.count || x.total.total - y.total.total)[0].store;
+  const refTotal = planTotal(ref.id);
+  let refSplit = 0;
+  data.comparison.items.forEach((_, i) => {
+    if (pick(i, ref.id)) refSplit += cost(i, planStore(i, "split"));
   });
-  // Both shops is only worth offering when it's cheaper than either one alone.
-  if (split.shops.size > 1 && splitSaves >= 0.5) {
+  const saves = refTotal.total - refSplit;
+  const other = STORES.find((s) => s.id !== ref.id);
+  // Only worth offering when it saves at least 50c or gets items the cheaper shop doesn't have.
+  if (split.shops.size > 1 && (saves >= 0.5 || split.count > refTotal.count)) {
+    const parts = ["Each item where it's cheaper."];
+    if (saves >= 0.005) {
+      parts.push(refTotal.missing.length
+        ? `${money.format(saves)} less than ${ref.name} for the items ${ref.name} has.`
+        : `${money.format(saves)} less than all at ${ref.name}.`);
+    }
+    const gained = data.comparison.items.filter((_, i) => !pick(i, ref.id) && pick(i, other.id)).map((item) => item.name);
+    if (gained.length) parts.push(`Gets ${namesOf(gained)} from ${other.name}.`);
     options.push({
       id: "split",
       label: [el("span", { class: "store-pair" }, STORES.map((s) => storeDot(s.id))), "Both shops"],
-      sub: `Each item where it's cheaper: ${money.format(splitSaves)} less than all at ${storeById(best.id).name}.`,
+      sub: parts.join(" "),
       total: split,
       badge: null,
     });
@@ -654,7 +829,7 @@ function planPicker(redraw, winner) {
       : null);
 }
 
-// -- One item: the product it'll be, and which shop --
+// -- One item: the product it'll be, how many, and which shop --
 
 const TAGS = {
   usual: { label: "You usually buy this", icon: "star", class: "usual" },
@@ -669,11 +844,25 @@ function tags(p, withCheck = false) {
   return list.length ? el("span", { class: "tags" }, list) : null;
 }
 
-const howMany = (p) => (p.packs > 1 ? `${p.packs} × ${money.format(p.price)}` : money.format(p.price));
+const timesPrice = (p, n) => (n > 1 ? `${n} × ${money.format(p.price)}` : money.format(p.price));
 
+// Size (unless the name says it) and the price per item or kilo.
 function productMeta(p) {
-  const size = p.size && p.size.toLowerCase() !== "each" && !p.name.includes(p.size) ? p.size : null;
-  return [size, p.unit_price && p.unit_price.text].filter(Boolean).join(" · ");
+  const size = p.size && p.size.toLowerCase() !== "each" && !p.name.toLowerCase().includes(p.size.toLowerCase()) ? p.size : null;
+  const value = p.value || p.unit_price;
+  return [size, value && value.text].filter(Boolean).join(" · ");
+}
+
+function stepper(i, storeId, redraw) {
+  const n = qty(i, storeId);
+  const change = (by) => {
+    setQty(i, storeId, clamp(n + by, 1, 24));
+    redraw();
+  };
+  return el("div", { class: "stepper", role: "group", "aria-label": "How many" },
+    el("button", { type: "button", "aria-label": "One fewer", disabled: n <= 1, onclick: () => change(-1) }, icon("minus")),
+    el("span", { class: "stepper-n", "aria-live": "polite" }, String(n)),
+    el("button", { type: "button", "aria-label": "One more", disabled: n >= 24, onclick: () => change(1) }, icon("plus")));
 }
 
 function itemRow(item, i, redraw) {
@@ -684,14 +873,29 @@ function itemRow(item, i, redraw) {
   const cheaper = cheaperAt(i);
 
   let product;
+  let howMany = null;
+  let tip = null;
   if (p) {
     const url = safeUrl(p.url);
     product = el("div", { class: "product" },
       photo(p.image),
       el("div", {},
         url ? el("a", { class: "pname", href: url, target: "_blank", rel: "noopener" }, p.name) : el("span", { class: "pname" }, p.name),
-        el("p", { class: "meta" }, [howMany(p), productMeta(p)].filter(Boolean).join(" · ")),
+        el("p", { class: "meta" }, [timesPrice(p, qty(i, s)), productMeta(p)].filter(Boolean).join(" · ")),
         tags(p, true)));
+    howMany = el("div", { class: "qty-row" }, el("span", { class: "qty-label" }, "How many"), stepper(i, s, redraw));
+    const better = cheaperSameAmount(i, s);
+    if (better) {
+      tip = el("div", { class: "tip-line" }, icon("bulb"),
+        el("span", {}, `${better.n > 1 ? `${better.n} × ` : "The "}${better.cand.size || better.cand.name} gets you the same for ${money.format(cost(i, s) - better.cost)} less.`),
+        el("button", { class: "button secondary small", type: "button", onclick: () => {
+          data.picks[i][s] = better.j;
+          data.chosen[i].add(s);
+          data.qty[i][s] = better.n;
+          remember(i, s);
+          redraw();
+        } }, "Switch"));
+    }
   } else {
     const has = STORES.filter((x) => pick(i, x.id));
     product = el("div", { class: "product none" }, has.length
@@ -701,13 +905,13 @@ function itemRow(item, i, redraw) {
         : "Neither shop seems to sell this.");
   }
 
-  const choose = el("div", { class: "switch", role: "group", "aria-label": `Where to buy ${item.name}` }, STORES.map((store) => {
-    const at = pick(i, store.id);
+  const where = el("div", { class: "switch", role: "group", "aria-label": `Where to buy ${item.name}` }, STORES.map((store) => {
+    const at = cost(i, store.id);
     const on = s === store.id;
-    const button = el("button", { type: "button", class: on ? "on" : "", "aria-pressed": String(on), disabled: !at },
+    const button = el("button", { type: "button", class: on ? "on" : "", "aria-pressed": String(on), disabled: at === null },
       storeDot(store.id),
       el("span", { class: "switch-name" }, store.name),
-      el("span", { class: "switch-price" }, at ? money.format(at.cost) : "Not sold",
+      el("span", { class: "switch-price" }, at === null ? "Not sold" : money.format(at),
         cheaper === store.id ? el("span", { class: "switch-cheaper" }, " Cheaper") : null));
     button.addEventListener("click", () => {
       data.storeFor[i] = store.id === planStore(i, data.plan) ? null : store.id;
@@ -722,42 +926,70 @@ function itemRow(item, i, redraw) {
       if (open) data.open.delete(i);
       else data.open.add(i);
       redraw();
-    } }, open ? "Done" : "Choose a different product")
+    } }, open ? "Done" : `See all ${candidates.length} options`)
     : null;
 
   return el("li", { class: "item" },
     el("div", { class: "item-head" },
       el("span", { class: "name" }, nice(item.name)),
-      el("span", { class: "cost" }, p ? money.format(p.cost) : "–")),
+      el("span", { class: "cost" }, p ? money.format(cost(i, s)) : "–")),
     product,
-    choose,
+    howMany,
+    where,
+    tip,
     toggle,
     open && s ? choices(item, i, s, source, redraw) : null);
 }
 
+// Every option at the shop: real matches first, best for the money first,
+// each priced for the same amount; then the shop's other results.
 function choices(item, i, storeId, source, redraw) {
   const store = storeById(storeId);
-  const current = data.picks[i][storeId] || 0;
-  const match = item.matches[storeId];
+  const current = pick(i, storeId);
+  const all = item.matches[storeId].candidates.map((cand, j) => ({ cand, j, n: packsFor(i, cand) }));
+  const amount = data.amount[i];
+  const byValue = (x, y) => (x.cand.value ? x.cand.value.price : Infinity) - (y.cand.value ? y.cand.value.price : Infinity) || x.cand.price - y.cand.price;
+  const byCost = (x, y) => x.cand.price * x.n - y.cand.price * y.n;
+  const good = all.filter((o) => o.cand.good_match).sort(amount ? byCost : byValue);
+  const others = all.filter((o) => !o.cand.good_match);
+  const showAll = data.showAll.has(i);
+  const shown = showAll ? [...good, ...others] : [...good, ...others].slice(0, 6);
+  const hidden = good.length + others.length - shown.length;
+
+  const option = ({ cand, j, n }) => {
+    const on = cand.id === current.id;
+    const button = el("button", { type: "button", class: `choice${on ? " on" : ""}`, "aria-pressed": String(on) },
+      photo(cand.image),
+      el("span", { class: "choice-text" },
+        el("span", { class: "pname" }, cand.name),
+        el("span", { class: "meta" }, productMeta(cand)),
+        tags(cand)),
+      el("span", { class: "choice-cost" }, money.format(round2(cand.price * n)),
+        n > 1 ? el("span", { class: "choice-times" }, timesPrice(cand, n)) : null));
+    button.addEventListener("click", () => {
+      selectProduct(i, storeId, j);
+      redraw();
+    });
+    return button;
+  };
+
+  let note;
+  if (source && source.display) note = `Your recipes need ${source.display}. Prices are for that much.`;
+  else if (amount) note = "Prices are for the same amount at both shops.";
+  else note = `Pick the ${store.name} product you want.`;
+  const firstOther = shown.findIndex((o) => !o.cand.good_match);
   return el("div", { class: "choices" },
-    el("p", { class: "note" }, source && source.display ? `Your recipes need ${source.display}. ` : "", `Pick the ${store.name} product you want:`),
-    match.candidates.map((cand, j) => {
-      const on = j === current;
-      const button = el("button", { type: "button", class: `choice${on ? " on" : ""}`, "aria-pressed": String(on) },
-        photo(cand.image),
-        el("span", { class: "choice-text" },
-          el("span", { class: "pname" }, cand.name),
-          el("span", { class: "meta" }, [howMany(cand), productMeta(cand)].filter(Boolean).join(" · ")),
-          tags(cand)),
-        el("span", { class: "choice-cost" }, money.format(cand.cost)));
-      button.addEventListener("click", () => {
-        data.picks[i][storeId] = j;
-        // Remember it, so Thermohub picks it first next time.
-        api("choices", { method: "POST", body: JSON.stringify({ store: storeId, key: item.key, product_id: cand.id, name: cand.name }) }).catch(failed);
+    el("p", { class: "note" }, note),
+    shown.map((o, k) => [
+      k === firstOther && good.length ? el("p", { class: "choices-label" }, "Other results") : null,
+      option(o),
+    ]),
+    hidden > 0
+      ? el("button", { class: "button secondary small", type: "button", onclick: () => {
+        data.showAll.add(i);
         redraw();
-      });
-      return button;
-    }));
+      } }, `Show ${plural(hidden, "more option")}`)
+      : null);
 }
 
 // -- Sending the basket to the shops' carts --
@@ -791,7 +1023,7 @@ function sendBasket(b) {
   startCart({
     orders: b.shops.map((s) => ({
       store: s.id,
-      lines: b.orders[s.id].map(({ item, p }) => ({ product_id: p.id, name: p.name, url: p.url, quantity: p.packs, key: item.key })),
+      lines: b.orders[s.id].map(({ item, p, n }) => ({ product_id: p.id, name: p.name, url: p.url, quantity: n, key: item.key })),
     })),
   });
 }

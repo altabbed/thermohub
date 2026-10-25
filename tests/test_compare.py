@@ -69,7 +69,7 @@ async def test_compare_totals_items_found_at_both_stores():
     onion, garlic, saffron = result.items
     assert onion.cheaper == "coles"
     assert garlic.cheaper == "woolworths"
-    assert len(garlic.matches["woolworths"].candidates) == 6
+    assert len(garlic.matches["woolworths"].candidates) == 8
     assert saffron.cheaper is None
     assert saffron.matches["coles"].candidates == []
     # Saffron is only at Woolworths, so it stays out of the totals.
@@ -163,6 +163,42 @@ async def test_compare_uses_remembered_choices(tmp_path):
     assert pick.id == "w-fancy"
     assert pick.tags == ["usual"]
     assert result.items[0].cheaper == "coles"
+
+
+@pytest.mark.anyio
+async def test_unmeasured_items_are_priced_for_the_same_amount_everywhere():
+    def tissue(store, rolls, price):
+        return product(
+            store,
+            f"{store[0]}{rolls}",
+            price,
+            f"Quilton Toilet Tissue {rolls} Pack",
+            f"{rolls} pack",
+        )
+
+    woolworths = FakeStore(
+        "woolworths",
+        {
+            "Toilet paper": [
+                tissue("woolworths", 12, 9.50),
+                tissue("woolworths", 24, 14.00),
+                tissue("woolworths", 36, 20.00),
+            ]
+        },
+    )
+    coles = FakeStore(
+        "coles", {"Toilet paper": [tissue("coles", 12, 9.00), tissue("coles", 24, 13.00)]}
+    )
+
+    result = await compare(items("Toilet paper"), [woolworths, coles])
+
+    [item] = result.items
+    # Coles' 24 pack is the best value (54c a roll), so both are priced for 24 rolls.
+    assert (item.amount.kind, item.amount.value) == ("count", 24)
+    assert item.matches["coles"].candidates[0].id == "c24"
+    assert item.matches["woolworths"].candidates[0].id == "w24"
+    assert len(item.matches["woolworths"].candidates) == 3
+    assert item.cheaper == "coles"
 
 
 @pytest.fixture

@@ -8,13 +8,14 @@ from pathlib import Path
 import re
 import time
 
-from thermohub.models import Candidate, Quantity, StoreProduct
+from thermohub.models import Candidate, Quantity, StoreProduct, UnitPrice
 
 _LOGGER = logging.getLogger(__name__)
 
-# How many of a store's search results are considered, and how many are shown.
-POOL = 12
-SHOWN = 6
+# How many of a store's search results are considered, and how many are
+# returned: every size and brand that matches, then a few other results.
+POOL = 40
+SHOWN = 24
 
 # ---- How much the recipes need -------------------------------------------------
 
@@ -168,10 +169,63 @@ def _words(text: str) -> set[str]:
     return {_singular(w) for w in _WORD.findall(text.lower()) if w not in _STOP}
 
 
+# Words a product may use instead of the ingredient's own: toilet paper is
+# sold as toilet tissue.
+_SYNONYMS = {
+    "paper": {"tissue"},
+    "chilli": {"chili"},
+    "yoghurt": {"yogurt"},
+    "mince": {"minced"},
+    "coriander": {"cilantro"},
+}
+
+
 def good_match(ingredient: str, product_name: str) -> bool:
     """Has every word of the ingredient and doesn't turn it into something else."""
     want, has = _words(ingredient), _words(product_name)
-    return want <= has and not ((has & _OTHER_PRODUCT) - want)
+    covered = all(w in has or has & _SYNONYMS.get(w, set()) for w in want)
+    return covered and not ((has & _OTHER_PRODUCT) - want)
+
+
+# ---- Value for money ----------------------------------------------------------------
+
+
+def value_basis(needs: dict[str, float], products: Sequence[StoreProduct]) -> str:
+    """Compare value per item or per kg/L.
+
+    By what the recipes count in when they say; otherwise by how the products
+    are sold: per item when most come in packs of several (toilet paper,
+    eggs), per kg/L otherwise (onions by the kilo or each).
+    """
+    if MASS in needs:
+        return MASS
+    if COUNT in needs:
+        return COUNT
+    held = [holds(p) for p in products]
+    counted = sum(1 for h in held if h.get(COUNT, 0) > 1)
+    weighed = sum(1 for h in held if MASS in h)
+    return COUNT if counted and counted >= weighed else MASS
+
+
+def unit_value(product: StoreProduct, has: dict[str, float], basis: str) -> UnitPrice | None:
+    """The product's price per item or per kg/L, or None when its size can't be read."""
+    if basis == COUNT:
+        count = has.get(COUNT)
+        if not count:
+            return None
+        each = product.price / count
+        return UnitPrice(price=round(each, 4), per="each", text=f"${each:.2f} each")
+    if product.unit_price and product.unit_price.per in ("kg", "L"):
+        return product.unit_price
+    grams = has.get(MASS)
+    if not grams:
+        return None
+    per_kg = product.price / grams * 1000
+    return UnitPrice(price=round(per_kg, 4), per="kg", text=f"${per_kg:.2f} per kg")
+
+
+def _value(candidate: Candidate) -> float:
+    return candidate.value.price if candidate.value else math.inf
 
 
 # ---- The pick --------------------------------------------------------------------
@@ -182,56 +236,87 @@ def choose(
     needs: dict[str, float],
     products: Sequence[StoreProduct],
     usual: str | None = None,
+    usual_packs: int | None = None,
+    basis: str | None = None,
 ) -> list[Candidate]:
     """Rank a store's search results for one ingredient, best pick first.
 
-    The pick is the product chosen last time when it turns up again;
-    otherwise the cheapest product that really matches, for the amount the
-    recipes need; otherwise the store's own top result.
+    The pick is the product chosen last time when it turns up again. Otherwise,
+    when there's an amount to buy, the cheapest real match that covers it;
+    when there isn't, the real match that's the best value per item or kg.
+    Failing all that, the store's own top result.
     """
+    pool = list(products[:POOL])
+    if not pool:
+        return []
+    matches = [good_match(ingredient, p.name) for p in pool]
+    basis = basis or value_basis(
+        needs, [p for p, ok in zip(pool, matches, strict=True) if ok] or pool
+    )
     candidates = []
-    for rank, product in enumerate(products[:POOL]):
+    for product, ok in zip(pool, matches, strict=True):
+        has = holds(product)
         packs = packs_needed(needs, product)
         candidates.append(
-            (
-                rank,
-                Candidate(
-                    **product.model_dump(),
-                    packs=packs,
-                    cost=round(product.price * packs, 2),
-                    good_match=good_match(ingredient, product.name),
-                ),
+            Candidate(
+                **product.model_dump(),
+                packs=packs,
+                cost=round(product.price * packs, 2),
+                good_match=ok,
+                holds=has,
+                value=unit_value(product, has, basis),
             )
         )
-    if not candidates:
-        return []
 
-    good = [c for _, c in candidates if c.good_match]
-    usual_pick = next((c for _, c in candidates if usual and c.id == usual), None)
+    good = [c for c in candidates if c.good_match]
+    usual_pick = next((c for c in candidates if usual and c.id == usual), None)
     if usual_pick:
         pick = usual_pick
+        if not needs and usual_packs:  # bought by the pack, not for a recipe: same as last time
+            pick.packs = usual_packs
+            pick.cost = round(pick.price * usual_packs, 2)
+    elif good and needs:
+        pick = min(good, key=lambda c: (c.cost, _value(c)))
     elif good:
-        pick = min(good, key=lambda c: c.cost)
+        pick = min(good, key=lambda c: (_value(c), c.cost))
     else:
-        pick = candidates[0][1]
+        pick = candidates[0]
 
-    for _, c in candidates:
+    for c in candidates:
         if c is usual_pick:
             c.tags.append("usual")
         if c.on_special:
             c.tags.append("special")
-    priced = [c for c in good if c.unit_price]
-    if len(priced) > 1:
-        per = priced[0].unit_price.per  # type: ignore[union-attr]
-        same = [c for c in priced if c.unit_price and c.unit_price.per == per]
-        if len(same) > 1:
-            min(same, key=lambda c: c.unit_price.price).tags.append("best_value")  # type: ignore[union-attr]
+    valued = [c for c in good if c.value]
+    if len(valued) > 1:
+        min(valued, key=_value).tags.append("best_value")
 
-    rest = sorted(
-        (rc for rc in candidates if rc[1] is not pick),
-        key=lambda rc: (not rc[1].good_match, rc[1].cost if rc[1].good_match else rc[0]),
-    )
-    return [pick, *(c for _, c in rest)][:SHOWN]
+    def order(c: Candidate) -> tuple[bool, float, float]:
+        if not c.good_match:
+            return (True, 0, 0)  # keeps the store's order
+        return (False, c.cost, _value(c)) if needs else (False, _value(c), c.cost)
+
+    rest = sorted((c for c in candidates if c is not pick), key=order)
+    return [pick, *rest][:SHOWN]
+
+
+def common_amount(picks: Sequence[Candidate]) -> dict[str, float]:
+    """The amount to price at every store when the recipes don't say how much.
+
+    What the product chosen last time holds (times how many), else what the
+    best-value pick holds, so the stores are compared for the same amount:
+    24 rolls at both, not 24 at one and 12 at the other.
+    """
+    usual = [c for c in picks if "usual" in c.tags]
+    for c in usual or sorted((c for c in picks if c.value), key=_value):
+        if c.value:
+            kind = COUNT if c.value.per == "each" else MASS
+        else:
+            kind = COUNT if COUNT in c.holds else MASS
+        amount = c.holds.get(kind)
+        if amount:
+            return {kind: amount * c.packs}
+    return {}
 
 
 # ---- Remembered choices ------------------------------------------------------------
@@ -260,8 +345,18 @@ class Preferences:
         chosen = self._data.get(store, {}).get(key)
         return str(chosen["id"]) if chosen else None
 
-    def remember(self, store: str, key: str, product_id: str, name: str) -> None:
-        self._data.setdefault(store, {})[key] = {"id": product_id, "name": name, "at": time.time()}
+    def usual_packs(self, store: str, key: str) -> int | None:
+        """How many were bought last time, for items the recipes don't measure."""
+        packs = self._data.get(store, {}).get(key, {}).get("packs")
+        return packs if isinstance(packs, int) and 1 <= packs <= 24 else None
+
+    def remember(
+        self, store: str, key: str, product_id: str, name: str, packs: int | None = None
+    ) -> None:
+        chosen: dict[str, object] = {"id": product_id, "name": name, "at": time.time()}
+        if packs:
+            chosen["packs"] = packs
+        self._data.setdefault(store, {})[key] = chosen
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self._data, indent=1), encoding="utf-8")

@@ -22,11 +22,13 @@ def woolworths_product(stockcode, name, price, *, was=None, size="1kg", cup=None
     }
 
 
-def woolworths_search(*products):
-    # Each result tile is a group whose own Products list starts with the shown product.
+def woolworths_search(*tiles):
+    # Each result tile is a group whose own Products list starts with the shown
+    # product, followed by its other sizes. Pass a list for a tile with sizes.
+    tiles = [t if isinstance(t, list) else [t] for t in tiles]
     return {
-        "SearchResultsCount": len(products),
-        "Products": [{"Name": p["Name"], "Products": [p]} for p in products],
+        "SearchResultsCount": sum(len(t) for t in tiles),
+        "Products": [{"Name": t[0]["Name"], "Products": t} for t in tiles],
     }
 
 
