@@ -61,8 +61,6 @@ class Woolworths(Store):
     async def search_in_browser(self, page: "Page", term: str) -> list[StoreProduct]:
         # The same search, made by the woolworths.com.au page itself, so the
         # bot protection sees a browser it has already checked.
-        if not page.url.startswith(self.base_url):
-            await page.goto(f"{self.base_url}/", wait_until="domcontentloaded", timeout=45_000)
         result = await page.evaluate(
             _FETCH, [f"{self.base_url}/apis/ui/Search/products", _request_body(term)]
         )

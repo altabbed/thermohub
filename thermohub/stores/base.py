@@ -37,7 +37,7 @@ class StoreUnreadable(StoreError):
 
 
 class BrowserPages(Protocol):
-    def page(self, store_id: str) -> AbstractAsyncContextManager["Page"]: ...
+    def search_page(self, store_id: str) -> AbstractAsyncContextManager["Page"]: ...
 
 
 # After plain requests are blocked, search in the browser for this long.
@@ -51,10 +51,15 @@ class Store:
     so the bot-protection cookies are set, as a browser would; when a
     search is blocked anyway the session is rebuilt once. If it's still
     blocked and Thermohub's browser is available (``browsers``), the search
-    is done in the browser instead (``search_in_browser``), which runs the
-    store's bot checks like any browser; searches stay in the browser for
-    a while after that. Results are cached so the status check and repeated
-    comparisons don't hit the store again.
+    is done in the browser instead, which runs the store's bot checks like
+    any browser; searches stay in the browser for a while after that.
+    Results are cached so the status check and repeated comparisons don't
+    hit the store again.
+
+    In the browser, one page opens the store's website (``open_in_browser``)
+    and every search is then made from that page (``search_in_browser``),
+    the way the website's own search box does: loading the whole website
+    for each search takes ten times as long.
     """
 
     id: StoreId
@@ -69,8 +74,9 @@ class Store:
     ) -> None:
         self.base_url = (base_url or self.home_url).rstrip("/")
         self._browsers = browsers
-        self._browser_gate = asyncio.Semaphore(2)  # pages are heavier than requests
         self._browser_until = 0.0
+        self._visit_lock = asyncio.Lock()
+        self._visits = 0  # times the search page has opened the website
         self._cache_seconds = cache_seconds
         self._cache: dict[str, tuple[float, list[StoreProduct]]] = {}
         self._session: AsyncSession | None = None
@@ -86,7 +92,7 @@ class Store:
             return cached[1]
         async with self._concurrency:
             if self._browsers and time.monotonic() < self._browser_until:
-                products = await self._search_with_browser(term)
+                products = await self.search_with_browser(term)
             else:
                 try:
                     products = await self.search_plainly(term)
@@ -94,7 +100,7 @@ class Store:
                     if not self._browsers:
                         raise
                     _LOGGER.info("%s: %s. Searching in the browser instead.", self.name, e)
-                    products = await self._search_with_browser(term)
+                    products = await self.search_with_browser(term)
                     self._browser_until = time.monotonic() + BROWSER_SECONDS
         self._cache[key] = (time.monotonic(), products)
         return products
@@ -109,24 +115,50 @@ class Store:
             await self._reset_session(session)
             return await self._search(await self._get_session(), term)
 
+    async def open_in_browser(self, page: "Page") -> None:
+        """Open the store's website in ``page``, passing its bot checks."""
+        await page.goto(f"{self.base_url}/", wait_until="domcontentloaded", timeout=45_000)
+
     async def search_in_browser(self, page: "Page", term: str) -> list[StoreProduct]:
-        """Search in a page of Thermohub's browser."""
+        """Search from ``page``, which has the store's website open.
+
+        Several searches can run in the same page at once, so this mustn't
+        navigate it.
+        """
         raise NotImplementedError
 
-    async def _search_with_browser(self, term: str) -> list[StoreProduct]:
+    async def search_with_browser(self, term: str) -> list[StoreProduct]:
+        """Search in Thermohub's browser, from its page for this store's searches."""
         assert self._browsers is not None
-        async with self._browser_gate:
-            try:
-                async with self._browsers.page(self.id) as page:
+        try:
+            async with self._browsers.search_page(self.id) as page:
+                visit = await self._visit(page)
+                try:
                     return await self.search_in_browser(page, term)
-            except StoreError:
-                raise
-            except Exception as e:  # the browser itself failed
-                _LOGGER.warning("Searching %s in the browser failed", self.name, exc_info=True)
-                reason = str(e).splitlines()[0][:200]
-                raise StoreError(
-                    f"Couldn't search {self.name} in Thermohub's browser: {reason}"
-                ) from e
+                except StoreBlocked:
+                    pass  # the bot check wants to run again
+                except StoreError:
+                    raise
+                except Exception:
+                    pass  # the page reloaded under the search (a bot check, or another search)
+                await self._visit(page, again=visit)  # unless another search already did
+                return await self.search_in_browser(page, term)
+        except StoreError:
+            raise
+        except Exception as e:  # the browser itself failed
+            _LOGGER.warning("Searching %s in the browser failed", self.name, exc_info=True)
+            reason = str(e).splitlines()[0][:200]
+            raise StoreError(f"Couldn't search {self.name} in Thermohub's browser: {reason}") from e
+
+    async def _visit(self, page: "Page", again: int | None = None) -> int:
+        """Have the store's website open in ``page``: open it when it isn't, or
+        reload it when it's still visit number ``again``. Returns the visit's number.
+        """
+        async with self._visit_lock:
+            if again == self._visits or not page.url.startswith(self.base_url):
+                self._visits += 1
+                await self.open_in_browser(page)
+            return self._visits
 
     async def close(self) -> None:
         await self._reset_session()

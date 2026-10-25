@@ -439,7 +439,7 @@ def test_shop_check(monkeypatch):
 
     monkeypatch.setattr(app.router, "lifespan_context", no_lifespan)
 
-    async def check_shop(store, site, browsers, term, report):
+    async def check_shop(store, site, browsers, report):
         await report(
             Check("Search Coles for “milk”", False, "Coles blocked the request (HTTP 403)")
         )

@@ -9,7 +9,15 @@ from urllib.parse import quote
 from curl_cffi.requests import AsyncSession
 
 from thermohub.models import Deal, StoreProduct, UnitPrice
-from thermohub.stores.base import Store, StoreBlocked, StoreUnreadable, deal, unit_price
+from thermohub.stores.base import (
+    BLOCKED_STATUSES,
+    Store,
+    StoreBlocked,
+    StoreError,
+    StoreUnreadable,
+    deal,
+    unit_price,
+)
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -17,6 +25,17 @@ if TYPE_CHECKING:
 SITE = "https://www.coles.com.au"
 IMAGES = "https://productimages.coles.com.au/productimages"
 _NEXT_DATA_RE = re.compile(r'<script[^>]*\bid="__NEXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL)
+# Fetches a search page from inside a coles.com.au page, with its cookies, and
+# hands back only the embedded data (the page is most of a megabyte).
+_FETCH = """async (url) => {
+  const response = await fetch(url, {
+    credentials: "include",
+    headers: {"Accept": "text/html,application/xhtml+xml"},
+  });
+  const html = await response.text();
+  const found = html.match(/<script[^>]*\\bid="__NEXT_DATA__"[^>]*>([\\s\\S]*?)<\\/script>/);
+  return {status: response.status, data: found ? found[1] : null};
+}"""
 # Coles' own wording of the unit price: "$4.90/ 1kg", "$1.38/ 100g", "$1.65 per 1L".
 _COMPARABLE = re.compile(r"\$\s*(\d+(?:\.\d+)?)\s*(?:/|per)\s*(\d+(?:\.\d+)?)?\s*([a-z]+)", re.I)
 
@@ -41,25 +60,33 @@ class Coles(Store):
             raise StoreUnreadable("Coles' search page has changed and can't be read")
         return parse_results(page_results(match.group(1)))
 
-    async def search_in_browser(self, page: "Page", term: str) -> list[StoreProduct]:
+    async def open_in_browser(self, page: "Page") -> None:
         # A real browser passes the bot check (it runs a script, then reloads
-        # into the page), and the results are in the same embedded data.
-        await page.goto(
-            f"{self.base_url}/search/products?q={quote(term)}",
-            wait_until="domcontentloaded",
-            timeout=45_000,
-        )
+        # into the page); the page's embedded data shows it got through.
+        await page.goto(f"{self.base_url}/", wait_until="domcontentloaded", timeout=45_000)
         try:
-            data = await page.wait_for_selector(
-                "script#__NEXT_DATA__", state="attached", timeout=25_000
-            )
+            await page.wait_for_selector("script#__NEXT_DATA__", state="attached", timeout=25_000)
         except Exception as e:
             title = await page.title()
             raise StoreBlocked(
-                f"Coles' search page didn't load in Thermohub's browser either "
+                f"Coles' website didn't load in Thermohub's browser either "
                 f'(it showed "{title[:80]}")'
             ) from e
-        return parse_results(page_results(await data.text_content() or ""))
+
+    async def search_in_browser(self, page: "Page", term: str) -> list[StoreProduct]:
+        # The same search page, fetched by the coles.com.au page that already
+        # passed the bot check, so it doesn't have to load the whole site.
+        found = await page.evaluate(_FETCH, f"{self.base_url}/search/products?q={quote(term)}")
+        if found["status"] in BLOCKED_STATUSES:
+            raise StoreBlocked(
+                f"Coles blocked the search in Thermohub's browser (HTTP {found['status']})"
+            )
+        if found["status"] >= 400:
+            raise StoreError(f"Coles returned HTTP {found['status']}")
+        if found["data"] is None:
+            # Coles' pages all mention Incapsula; with no results it's the challenge.
+            raise StoreBlocked("Coles' bot protection answered with a challenge page")
+        return parse_results(page_results(found["data"]))
 
 
 def page_results(next_data: str) -> list[Any]:

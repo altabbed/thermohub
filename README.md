@@ -165,9 +165,9 @@ tap targets, and no technical wording unless they open **Details**.
   shop whether Thermohub is signed in (sign in or out) and whether prices
   are working, with **Check again**. Under **Something not working?**,
   **Check Woolworths** and **Check Coles** try each step against the real
-  shop (search, search in Thermohub's browser, the sign-in page, signed
-  in?) and show what each step saw, with screenshots and a report to copy
-  and send.
+  shop (search, search in Thermohub's browser with how long it takes, the
+  sign-in page, signed in?) and show what each step saw, with screenshots
+  and a report to copy and send.
 
 The headline totals compare like for like: only items both shops have.
 
@@ -219,9 +219,13 @@ Both sites block ordinary scripts, so requests go through
 to the site, after first loading the home page like a browser would. Results
 are cached for 30 minutes. If a shop blocks those requests anyway (or answers
 with a page Thermohub can't read), Thermohub searches it in its own Chromium
-instead, the way the shop's website does, and keeps using the browser for
-that shop for 30 minutes. Only if that fails too does the shop's card turn red
-with the reason; the comparison still shows the other shop.
+instead, and keeps using the browser for that shop for 30 minutes. The
+browser opens the shop's website once (passing its bot check) and makes every
+search from that page, the way the website's own search box does, a few at a
+time; loading the whole website for each search would take about ten times as
+long. The page stays open for two minutes after the last search. Only if that
+fails too does the shop's card turn red with the reason; the comparison still
+shows the other shop.
 
 ## API
 

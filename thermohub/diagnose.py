@@ -8,7 +8,7 @@ each shop's data, for working out what changed on their side.
 
 import argparse
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 import json
 import os
@@ -86,25 +86,38 @@ async def search_plainly(store: Store, term: str) -> Check:
     )
 
 
-async def search_with_browser(store: Store, page: Page, term: str) -> Check:
-    """The same search in Thermohub's browser, which runs the shop's bot checks."""
-    name = f"Search {store.name} for “{term}” in Thermohub's browser"
+async def search_with_browser(store: Store, page: Page, terms: Sequence[str]) -> Check:
+    """The same searches in Thermohub's browser, which runs the shop's bot
+    checks: the shop's website opens once, then each search is made from it."""
+    name = f"Search {store.name} for “{terms[0]}” in Thermohub's browser"
+    facts: dict[str, Any] = {}
+    found: dict[str, int] = {}
+    products = []
     started = time.monotonic()
     try:
-        products = await store.search_in_browser(page, term)
+        await store.open_in_browser(page)
+        facts["opening_seconds"] = round(time.monotonic() - started, 1)
+        facts["search_seconds"] = []
+        for term in terms:
+            searched = time.monotonic()
+            results = await store.search_in_browser(page, term)
+            facts["search_seconds"].append(round(time.monotonic() - searched, 1))
+            found[term] = len(results)
+            products = products or results
     except Exception as e:
-        facts = await _page_facts(page)
-        facts["seconds"] = round(time.monotonic() - started, 1)
+        facts.update(await _page_facts(page))
+        facts["found"] = found
         return Check(name, False, _reason(e, store.name), facts, await _screenshot(page))
-    return Check(
-        name,
-        bool(products),
-        f"Found {len(products)} products" if products else "The search worked but found nothing",
-        {
-            "seconds": round(time.monotonic() - started, 1),
-            "first": [f"{p.name} · {p.size or ''} · ${p.price:.2f}" for p in products[:5]],
-        },
+    facts["found"] = found
+    facts["first"] = [f"{p.name} · {p.size or ''} · ${p.price:.2f}" for p in products[:5]]
+    if not products:
+        return Check(name, False, "The search worked but found nothing", facts)
+    each = sum(facts["search_seconds"]) / len(facts["search_seconds"])
+    summary = (
+        f"Found {found[terms[0]]} products. Opening the {store.name} website took "
+        f"{facts['opening_seconds']:.1f}s, then each search {each:.1f}s"
     )
+    return Check(name, True, summary, facts)
 
 
 async def sign_in_page(site: StoreSite, page: Page) -> Check:
@@ -160,10 +173,12 @@ async def check_shop(
     store: Store,
     site: StoreSite,
     browsers: Browsers,
-    term: str = "milk",
+    terms: Sequence[str] = ("milk", "bread", "eggs"),
     report: Callable[[Check], Awaitable[None]] | None = None,
 ) -> list[Check]:
-    """Every check for one shop, in order. ``store`` is a fresh one, so nothing is cached."""
+    """Every check for one shop, in order. ``store`` is a fresh one, so nothing
+    is cached. The plain search is for the first of ``terms``; in the browser,
+    for each of them, to time a search after the website has opened."""
     checks = []
 
     async def done(check: Check) -> None:
@@ -171,10 +186,10 @@ async def check_shop(
         if report:
             await report(check)
 
-    await done(await search_plainly(store, term))
+    await done(await search_plainly(store, terms[0]))
     try:
         async with browsers.page(site.id) as page:
-            await done(await search_with_browser(store, page, term))
+            await done(await search_with_browser(store, page, terms))
         async with browsers.page(site.id) as page:
             await done(await sign_in_page(site, page))
         async with browsers.page(site.id) as page:
@@ -332,7 +347,7 @@ async def _main(args: argparse.Namespace) -> None:
                     name = re.sub(r"[^a-z0-9]+", "-", check.name.lower()).strip("-")[:60]
                     (shots / f"{store_id}-{name}.jpg").write_bytes(check.screenshot)
 
-            await check_shop(store, SITES[store_id], browsers, args.terms[0], report)
+            await check_shop(store, SITES[store_id], browsers, args.terms, report)
             if args.deep:
                 try:
                     shape = await raw_shapes(store_id, args.terms)

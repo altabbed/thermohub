@@ -69,16 +69,27 @@ class SignedOut(Exception):
 class Browsers:
     """One Chromium profile per store, started when needed and closed when idle."""
 
-    def __init__(self, data_dir: Path, executable: str | None = None, idle_seconds: float = 300):
+    def __init__(
+        self,
+        data_dir: Path,
+        executable: str | None = None,
+        idle_seconds: float = 300,
+        search_idle_seconds: float = 120,
+    ):
         self._root = data_dir / "browser"
         self._executable = executable
         self._idle_seconds = idle_seconds
+        self._search_idle_seconds = search_idle_seconds
         self._playwright: Playwright | None = None
         self._contexts: dict[str, BrowserContext] = {}
         self._start_lock = asyncio.Lock()
         self._locks: dict[str, asyncio.Lock] = {}
         self._idle: dict[str, asyncio.TimerHandle] = {}
         self._pages_open: dict[str, int] = {}
+        self._search_pages: dict[str, Page] = {}
+        self._search_users: dict[str, int] = {}
+        self._search_idle: dict[str, asyncio.TimerHandle] = {}
+        self._search_lock = asyncio.Lock()
 
     def lock(self, store_id: str) -> asyncio.Lock:
         """Held while signing in or filling a cart, so the two never share a page."""
@@ -135,6 +146,59 @@ class Browsers:
             self._pages_open[store_id] -= 1
             self.release(store_id)
 
+    @asynccontextmanager
+    async def search_page(self, store_id: str) -> AsyncIterator[Page]:
+        """The store's page for searches: shared by the searches running at the
+        same time and kept open for a while after the last, so it stays on the
+        shop's website and each search doesn't load the whole site again.
+        Pictures, videos and fonts aren't downloaded.
+        """
+        self._search_users[store_id] = self._search_users.get(store_id, 0) + 1
+        handle = self._search_idle.pop(store_id, None)
+        if handle is not None:
+            handle.cancel()
+        try:
+            yield await self._search_page(store_id)
+        finally:
+            self._search_users[store_id] -= 1
+            if not self._search_users[store_id]:
+                self._search_idle[store_id] = asyncio.get_running_loop().call_later(
+                    self._search_idle_seconds,
+                    lambda: asyncio.ensure_future(self._close_search_page(store_id)),
+                )
+
+    async def _search_page(self, store_id: str) -> Page:
+        async with self._search_lock:
+            page = self._search_pages.get(store_id)
+            if page is not None and not page.is_closed():
+                return page
+            if page is not None:
+                self._search_page_closed(store_id, page)
+            page = await (await self.context(store_id)).new_page()
+            await page.route("**/*", _skip_heavy)
+            self._pages_open[store_id] = self._pages_open.get(store_id, 0) + 1
+            self._search_pages[store_id] = page
+            page.on("close", lambda _: self._search_page_closed(store_id, page))
+            return page
+
+    def _search_page_closed(self, store_id: str, page: Page) -> None:
+        if self._search_pages.get(store_id) is not page:
+            return  # already counted
+        del self._search_pages[store_id]
+        self._pages_open[store_id] -= 1
+        self.release(store_id)
+
+    async def _close_search_page(self, store_id: str) -> None:
+        self._search_idle.pop(store_id, None)
+        page = self._search_pages.get(store_id)
+        if page is None or self._search_users.get(store_id):
+            return
+        try:
+            await page.close()
+        except PlaywrightError:
+            pass  # the browser closed under it
+        self._search_page_closed(store_id, page)
+
     def release(self, store_id: str) -> None:
         """Close the store's browser once it has been idle for a while (it uses memory)."""
         self._cancel_idle(store_id)
@@ -166,6 +230,9 @@ class Browsers:
             self.set_signed_in(store_id, False)
 
     async def close(self) -> None:
+        for handle in self._search_idle.values():
+            handle.cancel()
+        self._search_idle.clear()
         for store_id in list(self._contexts):
             await self._close_context(store_id)
         if self._playwright is not None:

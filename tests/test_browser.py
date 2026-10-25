@@ -349,6 +349,8 @@ class BotProtectedShop:
     def __init__(self):
         self.plain_searches = 0
         self.browser_searches = 0
+        self.home_visits = 0  # by a browser that passed the check
+        self.challenge_once = False
         app = web.Application()
         app.router.add_get("/", self.home)
         app.router.add_get("/search/products", self.coles_search)
@@ -359,14 +361,18 @@ class BotProtectedShop:
         return str(self.server.make_url("")).rstrip("/")
 
     async def home(self, request):
-        page = (
-            '<html><body>Shop<script>document.cookie = "incap=ok; path=/";</script></body></html>'
-        )
+        if request.cookies.get("incap") != "ok":
+            return web.Response(text=CHALLENGE, content_type="text/html")
+        self.home_visits += 1
+        page = '<html><body>Shop<script id="__NEXT_DATA__" type="application/json">{}</script>'
         return web.Response(text=page, content_type="text/html")
 
     async def coles_search(self, request):
         if request.cookies.get("incap") != "ok":
             self.plain_searches += 1
+            return web.Response(text=CHALLENGE, content_type="text/html")
+        if self.challenge_once:
+            self.challenge_once = False
             return web.Response(text=CHALLENGE, content_type="text/html")
         self.browser_searches += 1
         page = coles_search_page(
@@ -405,10 +411,48 @@ async def test_coles_search_falls_back_to_the_browser(browsers, shop):
         await coles.close()
 
     assert (banana.name, banana.size, banana.price) == ("Coles Bananas", "approx 170g", 0.68)
-    # Challenged: the plain search, its retry with a fresh session, and the
-    # browser's first visit (its script then sets the cookie and reloads).
-    assert shop.plain_searches == 3
+    # Challenged: the plain search and its retry with a fresh session. The
+    # browser opens the website once (its script sets the cookie and reloads).
+    assert shop.plain_searches == 2
     assert shop.browser_searches == 2
+    assert shop.home_visits == 1
+
+
+@pytest.mark.anyio
+async def test_browser_searches_share_one_visit_to_the_website(browsers, shop):
+    coles = Coles(base_url=shop.url(), browsers=browsers)
+    terms = ["bananas", "milk", "eggs", "bread", "flour", "rice", "salt", "oats"]
+    found = await asyncio.gather(*(coles.search_with_browser(term) for term in terms))
+
+    assert all(len(products) == 1 for products in found)
+    assert shop.browser_searches == len(terms)
+    assert shop.home_visits == 1
+
+
+@pytest.mark.anyio
+async def test_a_challenged_browser_search_reopens_the_website_once(browsers, shop):
+    coles = Coles(base_url=shop.url(), browsers=browsers)
+    await coles.search_with_browser("milk")
+    shop.challenge_once = True
+    [banana] = await coles.search_with_browser("bananas")
+
+    assert banana.name == "Coles Bananas"
+    assert shop.home_visits == 2
+
+
+@pytest.mark.anyio
+async def test_the_search_page_closes_when_idle(tmp_path, shop):
+    browsers = Browsers(tmp_path, CHROMIUM, search_idle_seconds=0.2)
+    try:
+        async with browsers.search_page("coles") as page:
+            await page.goto(shop.url())
+        async with browsers.search_page("coles") as again:
+            assert again is page  # kept between searches
+        await wait_for(lambda: page.is_closed(), timeout=5)
+        async with browsers.search_page("coles") as fresh:
+            assert fresh is not page and not fresh.is_closed()
+    finally:
+        await browsers.close()
 
 
 @pytest.mark.anyio

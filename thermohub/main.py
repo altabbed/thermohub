@@ -392,7 +392,7 @@ async def start_shop_check(
         try:
             # A fresh store, so the plain search isn't answered from the cache.
             fresh = {"woolworths": Woolworths, "coles": Coles}[store_id]()
-            await check_shop(fresh, sites[store_id], browsers, "milk", report)
+            await check_shop(fresh, sites[store_id], browsers, report=report)
         except Exception as e:
             logging.getLogger(__name__).exception("Checking %s failed", store_id)
             await report(Check("Run the checks", False, str(e).splitlines()[0][:300]))
