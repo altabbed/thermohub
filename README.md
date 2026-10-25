@@ -90,29 +90,26 @@ page says so and asks you to sign in again.
 
 ## Web page
 
-Written for someone who isn't technical. Problems are explained in plain
-language, with the technical reason behind a **More info** link.
+Made for someone who isn't technical: one task per screen, large text and
+tap targets, and no technical wording unless they open **Details**.
 
-- **Home:** a card each for Cookidoo, Woolworths and Coles saying whether it's
-  connected, not set up yet, needs attention (for example, signed out), or not
-  working right now, with the button to fix it. The first time, a welcome
-  panel walks through connecting Cookidoo. Once connected, it shows how many
-  things are on your shopping list and a **Compare prices** button.
-- **Shopping list:** tick the items you want to price (or **Select all**),
-  then **Compare prices** to see which shop is cheaper and by how much, each
-  shop's total, the cost of buying each item wherever it's cheaper, and every
-  item side by side with the cheaper one highlighted.
-- **Settings:** connect or sign out of Cookidoo (country, email, password),
-  see each store's status, and check all connections again.
+- **Shopping list (home):** everything on your Cookidoo list, already ticked.
+  Untick what you don't need and press **Compare prices**. Three small chips
+  at the top show whether Cookidoo, Woolworths and Coles are working; one
+  turns amber when something needs a look, and tapping it opens Settings.
+  On the first visit this screen asks you to connect Cookidoo instead.
+- **Comparison:** one answer at the top ("Coles is cheaper, save $4.40"),
+  each shop's total, a tip when buying from both would save more, and each
+  item with its price at both shops. Tap an item to see the products and, if
+  the match is wrong (loose onions instead of a 1 kg bag), choose another;
+  the totals update.
+- **Settings:** your Cookidoo account (connect or sign out) and whether
+  Woolworths and Coles are working, with **Check again**.
 
-Woolworths and Coles don't need an account to compare prices; their account
-connection will come with cart filling.
-
-Each item is matched to the store's top search result. When that's the wrong
-product (loose onions instead of a 1 kg bag, say), pick another from the list
-under it and the totals update. Totals count one of each product and only
-include items both stores have; recipe quantities aren't matched to pack
-sizes yet.
+Totals count one of each product and only include items both shops have;
+recipe quantities aren't matched to pack sizes yet. Woolworths and Coles
+don't need an account to compare prices; their accounts will come with cart
+filling.
 
 ## How prices are looked up
 
