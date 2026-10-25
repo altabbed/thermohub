@@ -113,6 +113,34 @@ def test_parse_coles():
     assert garlic.unit_price.text == "$1.00 per 100g"
 
 
+def test_parse_coles_unit_prices_from_its_wording():
+    # As Coles sends a loose banana: the unit says per 1 g, the price is per kg.
+    banana = coles_product(409499, "Coles", "Bananas", 0.83, size="approx. 170g")
+    banana["pricing"]["unit"] = {
+        "quantity": 170,
+        "ofMeasureQuantity": 1,
+        "ofMeasureUnits": "g",
+        "price": 4.9,
+        "ofMeasureType": "g",
+        "isWeighted": True,
+    }
+    banana["pricing"]["comparable"] = "$4.90/ 1kg"
+    yoghurt = coles_product(1, "Babushka", "Kefir", 6.90, size="500g", unit=(1.38, 100, "g"))
+    yoghurt["pricing"]["comparable"] = "$1.38/ 100g"
+    tissue = coles_product(2, "Quilton", "Toilet Paper 20 Pack", 11.50, size="3600 Sheet")
+    tissue["pricing"]["comparable"] = "$0.32/ 100ea"
+
+    banana, yoghurt, tissue = parse_results([banana, yoghurt, tissue])
+
+    assert (banana.unit_price.price, banana.unit_price.per, banana.unit_price.text) == (
+        4.9,
+        "kg",
+        "$4.90/ 1kg",
+    )
+    assert (yoghurt.unit_price.price, yoghurt.unit_price.per) == (13.8, "kg")
+    assert (tissue.unit_price.price, tissue.unit_price.per) == (0.0032, "each")
+
+
 def test_parse_coles_bananas_and_deals():
     loose, mini, organic, pasta = parse_results(
         [

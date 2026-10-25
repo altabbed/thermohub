@@ -8,6 +8,12 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 import pytest
 
+from tests.store_fixtures import (
+    coles_product,
+    coles_search_page,
+    woolworths_product,
+    woolworths_search,
+)
 from thermohub.browser import (
     Browsers,
     CartJob,
@@ -18,6 +24,7 @@ from thermohub.browser import (
     check_signed_in,
     fill_carts,
 )
+from thermohub.stores import Coles, StoreBlocked, Woolworths
 
 CHROMIUM = os.environ.get("THERMOHUB_TEST_CHROMIUM") or (
     "/opt/pw-browsers/chromium" if Path("/opt/pw-browsers/chromium").exists() else None
@@ -35,6 +42,17 @@ PRODUCT = """<!doctype html><title>{pid}</title><h1>Product {pid}</h1>
   document.getElementById("more").onclick = post;
 </script>"""
 
+# Like Woolworths now: the sign-in address shows the home page, and the form
+# is behind "My account", then "Log in".
+HOME = """<!doctype html><title>Fakemart</title>
+<header><input type="search" placeholder="Search products">
+<button id="account">My account</button>
+<nav id="menu" hidden><a href="/login">Log in</a> <a href="/join">Sign up</a></nav></header>
+<script>
+  const menu = document.getElementById("menu");
+  document.getElementById("account").onclick = () => (menu.hidden = false);
+</script>"""
+
 LOGIN = """<!doctype html><title>Sign in</title>
 <style>input { display: block; width: 300px; height: 40px }</style>
 <form method="post" action="/login">
@@ -49,6 +67,7 @@ class FakeMart:
         self.cart = {}
         app = web.Application()
         app.router.add_get("/login", self.login_page)
+        app.router.add_get("/home", self.home)
         app.router.add_post("/login", self.login)
         app.router.add_get("/account", self.account)
         app.router.add_get("/product/{pid}", self.product)
@@ -66,6 +85,9 @@ class FakeMart:
             account_url=self.url("/account"),
             cart_url=self.url("/cart"),
         )
+
+    async def home(self, request):
+        return web.Response(text=HOME, content_type="text/html")
 
     async def login_page(self, request):
         return web.Response(text=LOGIN, content_type="text/html")
@@ -162,6 +184,29 @@ async def test_live_sign_in(browsers, mart):
     assert any(
         m == {"type": "address", "url": mart.url("/account")} for m in sent if isinstance(m, dict)
     )
+
+
+@pytest.mark.anyio
+async def test_sign_in_taps_through_to_the_form(browsers, mart):
+    from dataclasses import replace
+
+    from thermohub.diagnose import sign_in_page
+
+    site = replace(mart.site(), sign_in_url=mart.url("/home"))
+
+    async def send(message):
+        pass
+
+    session = LiveSignIn(browsers, site, send)
+    await session.start(400, 700)
+    assert session.page.url == mart.url("/login")
+    await session.close()
+
+    async with browsers.page("fakemart") as page:
+        check = await sign_in_page(site, page)
+    assert check.ok
+    assert check.facts["tapped"] == ["My account", "Log in"]
+    assert check.summary == "The sign-in form showed after tapping My account → Log in"
 
 
 @pytest.mark.anyio
@@ -271,6 +316,101 @@ async def test_sign_in_survives_a_restart_and_sign_out_forgets_it(tmp_path, mart
         assert await check_signed_in(page, mart.site()) is False
     finally:
         await second.close()
+
+
+CHALLENGE = """<html><head><title>Pardon Our Interruption</title></head><body>
+<p>Incapsula incident</p>
+<script>document.cookie = "incap=ok; path=/"; location.reload();</script></body></html>"""
+
+
+class BotProtectedShop:
+    """A shop whose bot check needs a browser: a cookie that only a script sets."""
+
+    def __init__(self):
+        self.plain_searches = 0
+        self.browser_searches = 0
+        app = web.Application()
+        app.router.add_get("/", self.home)
+        app.router.add_get("/search/products", self.coles_search)
+        app.router.add_post("/apis/ui/Search/products", self.woolworths_search)
+        self.server = TestServer(app)
+
+    def url(self):
+        return str(self.server.make_url("")).rstrip("/")
+
+    async def home(self, request):
+        page = (
+            '<html><body>Shop<script>document.cookie = "incap=ok; path=/";</script></body></html>'
+        )
+        return web.Response(text=page, content_type="text/html")
+
+    async def coles_search(self, request):
+        if request.cookies.get("incap") != "ok":
+            self.plain_searches += 1
+            return web.Response(text=CHALLENGE, content_type="text/html")
+        self.browser_searches += 1
+        page = coles_search_page(
+            coles_product(409499, "Coles", "Bananas", 0.68, size="approx 170g")
+        )
+        return web.Response(text=page, content_type="text/html")
+
+    async def woolworths_search(self, request):
+        if request.cookies.get("incap") != "ok":
+            self.plain_searches += 1
+            return web.Response(status=403, text="Access Denied")
+        self.browser_searches += 1
+        body = await request.json()
+        return web.json_response(
+            woolworths_search(
+                woolworths_product(1, f"{body['searchTerm'].title()}", 0.80, size="each")
+            )
+        )
+
+
+@pytest.fixture
+async def shop():
+    fake = BotProtectedShop()
+    await fake.server.start_server()
+    yield fake
+    await fake.server.close()
+
+
+@pytest.mark.anyio
+async def test_coles_search_falls_back_to_the_browser(browsers, shop):
+    coles = Coles(base_url=shop.url(), browsers=browsers)
+    try:
+        [banana] = await coles.search("bananas")
+        await coles.search("milk")  # straight to the browser now
+    finally:
+        await coles.close()
+
+    assert (banana.name, banana.size, banana.price) == ("Coles Bananas", "approx 170g", 0.68)
+    # Challenged: the plain search, its retry with a fresh session, and the
+    # browser's first visit (its script then sets the cookie and reloads).
+    assert shop.plain_searches == 3
+    assert shop.browser_searches == 2
+
+
+@pytest.mark.anyio
+async def test_woolworths_search_falls_back_to_the_browser(browsers, shop):
+    woolworths = Woolworths(base_url=shop.url(), browsers=browsers)
+    try:
+        [banana] = await woolworths.search("bananas")
+    finally:
+        await woolworths.close()
+
+    assert banana.name == "Bananas each"
+    assert shop.browser_searches == 1
+
+
+@pytest.mark.anyio
+async def test_without_a_browser_a_block_is_reported(shop):
+    coles = Coles(base_url=shop.url())
+    try:
+        with pytest.raises(StoreBlocked):
+            await coles.search("bananas")
+    finally:
+        await coles.close()
 
 
 @pytest.fixture

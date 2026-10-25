@@ -23,6 +23,7 @@ from thermohub.main import (
     get_comparisons,
     get_cookidoo,
     get_preferences,
+    get_shop_checks,
     get_sites,
     get_stores,
 )
@@ -94,6 +95,7 @@ def make_client(
     browsers=None,
     jobs=None,
     comparisons=None,
+    checks=None,
 ):
     settings = Settings(_env_file=None, THERMOHUB_API_KEY=api_key)
     cookidoo = cookidoo or FakeCookidoo()
@@ -102,7 +104,9 @@ def make_client(
     browsers = browsers or FakeBrowsers()
     jobs = {} if jobs is None else jobs
     comparisons = {} if comparisons is None else comparisons
+    checks = {} if checks is None else checks
     app.dependency_overrides[get_comparisons] = lambda: comparisons
+    app.dependency_overrides[get_shop_checks] = lambda: checks
     app.dependency_overrides[get_browsers] = lambda: browsers
     app.dependency_overrides[get_sites] = lambda: SITES
     app.dependency_overrides[get_cart_jobs] = lambda: jobs
@@ -428,6 +432,49 @@ def test_store_search():
     assert client.get("/api/stores/coles/search", params={"q": "milk"}).status_code == 502
     assert client.get("/api/stores/aldi/search", params={"q": "milk"}).status_code == 404
     assert client.get("/api/stores/coles/search").status_code == 422
+
+
+def test_shop_check(monkeypatch):
+    from thermohub.diagnose import Check
+
+    monkeypatch.setattr(app.router, "lifespan_context", no_lifespan)
+
+    async def check_shop(store, site, browsers, term, report):
+        await report(
+            Check("Search Coles for “milk”", False, "Coles blocked the request (HTTP 403)")
+        )
+        await report(
+            Check(
+                "Open the Coles sign-in page",
+                True,
+                "It opened",
+                {"url": site.sign_in_url},
+                b"\xff\xd8",
+            )
+        )
+
+    monkeypatch.setattr(main, "check_shop", check_shop)
+    checks = {}
+    with make_client(checks=checks) as client:
+        job = client.post("/api/stores/coles/checks").json()
+        for _ in range(100):
+            job = client.get(f"/api/stores/coles/checks/{job['id']}").json()
+            if job["done"]:
+                break
+            time.sleep(0.02)
+
+    assert job["done"] is True
+    blocked, sign_in = job["checks"]
+    assert (blocked["ok"], blocked["summary"]) == (False, "Coles blocked the request (HTTP 403)")
+    assert sign_in["facts"] == {"url": "https://www.coles.com.au/account"}
+    assert sign_in["screenshot"] == "data:image/jpeg;base64,/9g="
+
+
+def test_shop_check_unknown():
+    client = make_client()
+
+    assert client.post("/api/stores/aldi/checks").status_code == 404
+    assert client.get("/api/stores/coles/checks/nope").status_code == 404
 
 
 def test_store_sign_out():

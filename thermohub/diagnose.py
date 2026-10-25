@@ -21,7 +21,15 @@ from typing import Any
 from curl_cffi.requests import AsyncSession
 from playwright.async_api import Page
 
-from thermohub.browser import SITES, Browsers, StoreSite, looks_signed_out
+from thermohub.browser import (
+    SITES,
+    Browsers,
+    StoreSite,
+    find_login_form,
+    has_login_form,
+    looks_signed_out,
+    settle,
+)
 from thermohub.stores import Coles, Store, StoreError, Woolworths
 from thermohub.stores.base import IMPERSONATE
 
@@ -93,27 +101,30 @@ async def search_with_browser(store: Store, page: Page, term: str) -> Check:
 
 
 async def sign_in_page(site: StoreSite, page: Page) -> Check:
-    """Does the shop's sign-in page open, with somewhere to type?"""
+    """Does the shop's sign-in form show, tapping through "Log in" if needed?"""
     name = f"Open the {site.name} sign-in page"
     try:
         response = await page.goto(site.sign_in_url, wait_until="domcontentloaded", timeout=45_000)
-        await _settle(page)
+        await settle(page)
+        opened_at = page.url
+        tapped = await find_login_form(page)
+        found = await has_login_form(page)
     except Exception as e:
-        return Check(
-            name, False, f"It didn't open: {str(e).splitlines()[0][:200]}", await _page_facts(page)
-        )
+        reason = str(e).splitlines()[0][:200]
+        return Check(name, False, f"It didn't open: {reason}", await _page_facts(page))
     facts = await _page_facts(page)
     facts["status"] = response.status if response else None
-    boxes = [f for f in facts["fields"] if f.startswith("input") and " password " not in f]
+    facts["opened_at"] = opened_at
+    facts["tapped"] = tapped
     if facts["blocked"]:
-        summary, ok = (
-            f"The page says: “{facts['blocked']}”. The shop's bot protection may be stopping it.",
-            False,
-        )
-    elif not facts["fields"] and not facts["frames"]:
-        summary, ok = "The page opened but has nothing to type in", False
+        summary = f"The page says: “{facts['blocked']}”. Bot protection may be stopping it."
+        ok = False
+    elif found:
+        how = f" after tapping {' → '.join(tapped)}" if tapped else ""
+        summary, ok = f"The sign-in form showed{how}", True
     else:
-        summary, ok = f"It opened with {len(boxes)} box(es) to type in", True
+        tried = f" (tapped {' → '.join(tapped)})" if tapped else ""
+        summary, ok = f"No sign-in form showed{tried}", False
     return Check(name, ok, summary, facts, await _screenshot(page))
 
 
@@ -122,7 +133,7 @@ async def account_page(site: StoreSite, page: Page) -> Check:
     name = f"Check the {site.name} sign-in"
     try:
         await page.goto(site.account_url, wait_until="domcontentloaded", timeout=45_000)
-        await _settle(page)
+        await settle(page)
     except Exception as e:
         return Check(
             name,
@@ -167,15 +178,6 @@ async def check_shop(
     except Exception as e:
         await done(Check("Start Thermohub's browser", False, str(e).splitlines()[0][:300]))
     return checks
-
-
-async def _settle(page: Page) -> None:
-    """Let redirects and scripts finish (shops' pages keep loading for a while)."""
-    try:
-        await page.wait_for_load_state("networkidle", timeout=10_000)
-    except Exception:
-        pass
-    await page.wait_for_timeout(1000)
 
 
 async def _page_facts(page: Page) -> dict[str, Any]:

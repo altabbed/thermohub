@@ -220,6 +220,71 @@ async def looks_signed_out(page: Page) -> bool:
     return await page.locator("input[type=password]").count() > 0
 
 
+async def settle(page: Page, idle_ms: int = 8000) -> None:
+    """Let redirects and scripts finish: shops' pages keep loading for a while."""
+    try:
+        await page.wait_for_load_state("networkidle", timeout=idle_ms)
+    except PlaywrightError:
+        pass
+    await page.wait_for_timeout(800)
+
+
+# A box for a sign-in email, username or password.
+_LOGIN_FIELD = (
+    "input[type=email]:visible, input[type=password]:visible, "
+    "input[autocomplete=username]:visible, input[autocomplete=email]:visible"
+)
+# What leads to the sign-in form, best first.
+_LOGIN_LINKS = [
+    re.compile(r"^\s*(log|sign)\s*-?\s*in\b", re.IGNORECASE),
+    re.compile(r"\bmy\s*account\b", re.IGNORECASE),
+]
+
+
+async def has_login_form(page: Page) -> bool:
+    for frame in page.frames:
+        try:
+            if await frame.locator(_LOGIN_FIELD).count():
+                return True
+        except PlaywrightError:
+            continue  # a frame that went away
+    return False
+
+
+async def find_login_form(page: Page, steps: int = 3) -> list[str]:
+    """From where the page is, tap "Log in" or "My account" until the sign-in form shows.
+
+    Shops move their sign-in around: Woolworths' sign-in address shows its
+    home page, with the form behind "My account" and "Log in". Returns the
+    words tapped, in order.
+    """
+    tapped: list[str] = []
+    for _ in range(steps):
+        if await has_login_form(page):
+            break
+        target = None
+        for pattern in _LOGIN_LINKS:
+            for role in ("link", "button"):
+                found = page.get_by_role(role, name=pattern)  # type: ignore[arg-type]
+                for k in range(min(await found.count(), 6)):
+                    if await found.nth(k).is_visible():
+                        target = found.nth(k)
+                        break
+                if target:
+                    break
+            if target:
+                break
+        if target is None:
+            break
+        tapped.append(" ".join((await target.inner_text()).split())[:40] or "(unlabelled)")
+        try:
+            await target.click(timeout=5000)
+        except PlaywrightError:
+            break
+        await settle(page)
+    return tapped
+
+
 async def check_signed_in(page: Page, site: StoreSite) -> bool:
     for attempt in (1, 2):
         try:
@@ -288,10 +353,16 @@ class LiveSignIn:
             },
         )
         self.page.on("framenavigated", self._navigated)
+        await self._open_sign_in()
+
+    async def _open_sign_in(self) -> None:
+        page = self._require_page()
         try:
-            await self.page.goto(
-                self._site.sign_in_url, wait_until="domcontentloaded", timeout=45_000
-            )
+            await page.goto(self._site.sign_in_url, wait_until="domcontentloaded", timeout=45_000)
+            await settle(page)
+            tapped = await find_login_form(page)
+            if tapped:
+                _LOGGER.info("%s sign-in: tapped %s to reach the form", self._site.name, tapped)
         except Exception as e:  # the person can still use the page or try again
             _LOGGER.info("Opening the %s sign-in page failed: %s", self._site.name, e)
 
@@ -326,9 +397,7 @@ class LiveSignIn:
         await self._require_page().go_back(wait_until="domcontentloaded", timeout=30_000)
 
     async def restart(self) -> None:
-        await self._require_page().goto(
-            self._site.sign_in_url, wait_until="domcontentloaded", timeout=45_000
-        )
+        await self._open_sign_in()
 
     async def finish(self) -> bool:
         """Check whether the person is now signed in, remember it, and close the page."""

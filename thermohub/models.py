@@ -1,7 +1,7 @@
 """API response models."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -174,6 +174,23 @@ class ComparisonJob(BaseModel):
     )
     result: Comparison | None = Field(default=None, description="The comparison, once done.")
     error: str | None = None
+
+
+class ShopCheck(BaseModel):
+    """One step of checking a shop: what Thermohub tried and what it saw."""
+
+    name: str
+    ok: bool
+    summary: str
+    facts: dict[str, Any] = Field(description="Address, page title, boxes found, timings and such.")
+    screenshot: str | None = Field(default=None, description="data: URL of the page.")
+
+
+class ShopCheckJob(BaseModel):
+    id: str
+    store: StoreId
+    done: bool
+    checks: list[ShopCheck]
 
 
 class CompareRequestItem(BaseModel):

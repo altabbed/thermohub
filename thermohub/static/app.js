@@ -189,7 +189,7 @@ function failed(err) {
 
 // ---- Screens ------------------------------------------------------------------
 
-const SCREENS = { list: showList, compare: showCompare, accounts: showSettings, signin: showSignIn, cart: showCart };
+const SCREENS = { list: showList, compare: showCompare, accounts: showSettings, signin: showSignIn, cart: showCart, check: showCheck };
 
 // "#signin/coles" is the sign-in screen for Coles.
 function route() {
@@ -1544,6 +1544,94 @@ function showSignIn(root, storeId) {
   };
 }
 
+// -- Checking a shop step by step --
+
+function showCheck(root, storeId) {
+  const store = storeById(storeId);
+  if (!store) return go("accounts");
+  const title = el("h1", {}, `Checking ${store.name}`);
+  const status = el("p", {}, "This takes up to a minute.");
+  const steps = el("ul", { class: "card rows checks" });
+  const end = el("div", { class: "stack" });
+  root.append(header({ href: "#accounts", label: "Settings" }), el("div", { class: "title" }, title, status), steps, end);
+
+  let job = null;
+  const draw = () => {
+    fill(steps, job ? job.checks.map(checkRow) : null,
+      job && job.done ? null : el("li", { class: "check-row" }, el("span", { class: "spinner small" }), el("span", {}, job && job.checks.length ? "Next step…" : "Starting…")));
+    if (!job || !job.done) return;
+    const bad = job.checks.filter((c) => !c.ok);
+    title.textContent = bad.length ? `${store.name}: ${plural(bad.length, "problem")} found` : `${store.name} looks fine`;
+    status.textContent = bad.length
+      ? "Tap a step to see what Thermohub saw. Copy the report below to send to whoever helps you with Thermohub."
+      : "Everything Thermohub tried worked.";
+    fill(end, reportBox(store, job));
+  };
+  const follow = () => setTimeout(async () => {
+    if (!steps.isConnected) return;
+    try {
+      job = await api(`stores/${storeId}/checks/${job.id}`);
+    } catch (err) {
+      if (err instanceof NeedsKey) return showKeyScreen();
+      return follow(); // Thermohub blinked: keep asking
+    }
+    if (!steps.isConnected) return;
+    draw();
+    if (!job.done) follow();
+  }, 1500);
+  draw();
+  api(`stores/${storeId}/checks`, { method: "POST" })
+    .then((started) => {
+      job = started;
+      follow();
+    })
+    .catch((err) => {
+      if (err instanceof NeedsKey) return showKeyScreen();
+      status.textContent = err.message;
+    });
+}
+
+function checkRow(check) {
+  const shown = (v) => v !== null && v !== undefined && v !== "" && !(Array.isArray(v) && !v.length);
+  const facts = Object.entries(check.facts).filter(([, v]) => shown(v));
+  const picture = check.screenshot && check.screenshot.startsWith("data:image/") ? check.screenshot : null;
+  return el("li", { class: `check-row ${check.ok ? "ok" : "bad"}` },
+    icon(check.ok ? "check" : "warn"),
+    el("div", { class: "check-text" },
+      el("strong", {}, check.name),
+      el("p", {}, check.summary),
+      facts.length || picture
+        ? el("details", { class: "details" }, el("summary", {}, "What Thermohub saw"),
+          el("dl", { class: "facts" }, facts.map(([k, v]) => [el("dt", {}, k), el("dd", {}, Array.isArray(v) ? v.join("\n") : String(v))])),
+          picture ? el("img", { class: "seen", src: picture, alt: `What ${check.name.toLowerCase()} showed` }) : null)
+        : null));
+}
+
+function reportBox(store, job) {
+  const lines = [`Thermohub check: ${store.name}, ${new Date().toISOString()}`];
+  for (const c of job.checks) {
+    lines.push("", `[${c.ok ? "ok" : "FAIL"}] ${c.name}: ${c.summary}`);
+    for (const [k, v] of Object.entries(c.facts)) lines.push(`  ${k}: ${Array.isArray(v) ? v.join(" | ") : v}`);
+  }
+  const text = lines.join("\n");
+  const area = el("textarea", { class: "report", readOnly: true, rows: 8, value: text, "aria-label": "Report" });
+  const copy = el("button", { class: "button primary small", type: "button" }, "Copy report");
+  copy.addEventListener("click", async () => {
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch { /* not available on a plain http address */ }
+    if (!copied) {
+      area.select();
+      try { copied = document.execCommand("copy"); } catch { /* old way not allowed either */ }
+    }
+    copy.textContent = copied ? "Copied" : "Select the text above and copy it";
+  });
+  return [el("p", { class: "section-label" }, "Report"), area, el("div", {}, copy),
+    el("p", { class: "note" }, "The report has the addresses and titles of the pages Thermohub saw, not the pictures.")];
+}
+
 // -- Settings --
 
 function showSettings(root) {
@@ -1576,7 +1664,12 @@ function showSettings(root) {
       el("p", { class: "section-label" }, "Accounts"),
       el("ul", { class: "card rows" }, cookidooRow, STORES.map((s) => storeRows[s.id])),
       el("p", { class: "note", style: "padding: 0 4px" }, "Comparing prices works without signing in to the shops. Sign in to a shop to send items to its cart.")),
-    el("div", {}, recheck));
+    el("div", {}, recheck),
+    el("div", { class: "stack" },
+      el("p", { class: "section-label" }, "Something not working?"),
+      el("div", { class: "card message" },
+        el("p", {}, "Thermohub can check a shop step by step (searching, the sign-in page, whether it's signed in) and show what it saw."),
+        el("div", { class: "confirm" }, STORES.map((s) => el("a", { class: "button secondary small", href: `#check/${s.id}` }, `Check ${s.name}`))))));
   drawStores();
   loadStores(false);
   drawCookidoo(cookidooRow);

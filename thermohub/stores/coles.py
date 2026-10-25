@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 from curl_cffi.requests import AsyncSession
 
-from thermohub.models import Deal, StoreProduct
+from thermohub.models import Deal, StoreProduct, UnitPrice
 from thermohub.stores.base import Store, StoreBlocked, StoreUnreadable, deal, unit_price
 
 if TYPE_CHECKING:
@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 SITE = "https://www.coles.com.au"
 IMAGES = "https://productimages.coles.com.au/productimages"
 _NEXT_DATA_RE = re.compile(r'<script[^>]*\bid="__NEXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL)
+# Coles' own wording of the unit price: "$4.90/ 1kg", "$1.38/ 100g", "$1.65 per 1L".
+_COMPARABLE = re.compile(r"\$\s*(\d+(?:\.\d+)?)\s*(?:/|per)\s*(\d+(?:\.\d+)?)?\s*([a-z]+)", re.I)
 
 
 class Coles(Store):
@@ -84,7 +86,6 @@ def parse_results(results: list[Any]) -> list[StoreProduct]:
             continue
         seen.add(raw.get("id"))
         was = pricing.get("was")
-        unit = pricing.get("unit") or {}
         brand, name, size = raw.get("brand") or "", raw.get("name") or "", raw.get("size") or ""
         images = raw.get("imageUris") or []
         products.append(
@@ -96,17 +97,25 @@ def parse_results(results: list[Any]) -> list[StoreProduct]:
                 price=price,
                 was_price=was if isinstance(was, int | float) and was > price else None,
                 on_special=isinstance(was, int | float) and was > price,
-                unit_price=unit_price(
-                    unit.get("price"),
-                    f"{unit.get('ofMeasureQuantity') or 1}{unit.get('ofMeasureUnits') or ''}",
-                    pricing.get("comparable"),
-                ),
+                unit_price=_unit_price(pricing),
                 deal=_deal(price, pricing),
                 image=f"{IMAGES}{images[0]['uri']}" if images and images[0].get("uri") else None,
                 url=f"{SITE}/product/{_slug(f'{brand} {name} {size}')}-{raw.get('id')}",
             )
         )
     return products
+
+
+def _unit_price(pricing: Mapping[str, Any]) -> UnitPrice | None:
+    # Read Coles' wording first: for things sold by weight (loose bananas)
+    # its "unit" says per 1 g while the price is per kg.
+    text = pricing.get("comparable")
+    found = _COMPARABLE.search(text) if isinstance(text, str) else None
+    if found:
+        return unit_price(float(found.group(1)), f"{found.group(2) or 1}{found.group(3)}", text)
+    unit = pricing.get("unit") or {}
+    measure = f"{unit.get('ofMeasureQuantity') or 1}{unit.get('ofMeasureUnits') or ''}"
+    return unit_price(unit.get("price"), measure, text)
 
 
 def _deal(price: float, pricing: Mapping[str, Any]) -> Deal | None:

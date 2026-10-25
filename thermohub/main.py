@@ -44,6 +44,7 @@ from thermohub.browser import (
 from thermohub.compare import compare
 from thermohub.config import Settings, get_settings
 from thermohub.cookidoo_client import CookidooClient, NotSignedIn, UnknownRegion, regions
+from thermohub.diagnose import Check, check_shop
 from thermohub.models import (
     CartJobView,
     CartLineView,
@@ -57,6 +58,8 @@ from thermohub.models import (
     ConnectionState,
     CookidooAccount,
     Region,
+    ShopCheck,
+    ShopCheckJob,
     ShoppingList,
     SignInRequest,
     Status,
@@ -89,6 +92,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.sites = SITES
     app.state.cart_jobs = {}
     app.state.comparisons = {}
+    app.state.shop_checks = {}
     try:
         yield
     finally:
@@ -135,6 +139,10 @@ class ComparisonRun:
 
 def get_comparisons(request: Request) -> dict[str, ComparisonRun]:
     return request.app.state.comparisons
+
+
+def get_shop_checks(request: Request) -> dict[str, ShopCheckJob]:
+    return request.app.state.shop_checks
 
 
 def require_api_key(
@@ -347,6 +355,66 @@ def _comparison_view(run: ComparisonRun) -> ComparisonJob:
         result=run.result,
         error=run.error,
     )
+
+
+@api.post("/stores/{store_id}/checks", response_model=ShopCheckJob, status_code=202)
+async def start_shop_check(
+    store_id: str,
+    stores: Annotated[list[Store], Depends(get_stores)],
+    browsers: Annotated[Browsers, Depends(get_browsers)],
+    sites: Annotated[dict[str, StoreSite], Depends(get_sites)],
+    checks: Annotated[dict[str, ShopCheckJob], Depends(get_shop_checks)],
+) -> ShopCheckJob:
+    """Check a shop step by step (search, search in the browser, sign-in page,
+    signed in?) and report what each step saw; follow with GET .../checks/{id}."""
+    store = next((s for s in stores if s.id == store_id), None)
+    if store is None or store_id not in sites:
+        raise HTTPException(status_code=404, detail="No such store.")
+    job = ShopCheckJob(id=uuid.uuid4().hex, store=store_id, done=False, checks=[])  # type: ignore[arg-type]
+    for old in list(checks)[:-4]:
+        checks.pop(old, None)  # keep the last 5
+    checks[job.id] = job
+
+    async def report(check: Check) -> None:
+        job.checks.append(
+            ShopCheck(
+                name=check.name,
+                ok=check.ok,
+                summary=check.summary,
+                facts=check.facts,
+                screenshot="data:image/jpeg;base64," + base64.b64encode(check.screenshot).decode()
+                if check.screenshot
+                else None,
+            )
+        )
+
+    async def work() -> None:
+        try:
+            # A fresh store, so the plain search isn't answered from the cache.
+            fresh = {"woolworths": Woolworths, "coles": Coles}[store_id]()
+            await check_shop(fresh, sites[store_id], browsers, "milk", report)
+        except Exception as e:
+            logging.getLogger(__name__).exception("Checking %s failed", store_id)
+            await report(Check("Run the checks", False, str(e).splitlines()[0][:300]))
+        finally:
+            job.done = True
+
+    task = asyncio.create_task(work())
+    _running.add(task)
+    task.add_done_callback(_running.discard)
+    return job
+
+
+@api.get("/stores/{store_id}/checks/{check_id}", response_model=ShopCheckJob)
+async def get_shop_check(
+    store_id: str,
+    check_id: str,
+    checks: Annotated[dict[str, ShopCheckJob], Depends(get_shop_checks)],
+) -> ShopCheckJob:
+    job = checks.get(check_id)
+    if job is None or job.store != store_id:
+        raise HTTPException(status_code=404, detail="That check has been cleared. Run it again.")
+    return job
 
 
 @api.post("/stores/{store_id}/sign-out", status_code=204)

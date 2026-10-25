@@ -402,6 +402,19 @@ a.pname:hover { text-decoration: underline; }
 @keyframes shimmer { to { transform: translateX(100%); } }
 .splash .note { max-width: 420px; }
 
+/* Checking a shop */
+.check-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; align-items: start; padding: 14px 18px; }
+.check-row > .icon { margin-top: 3px; color: var(--ink-soft); }
+.check-row.ok > .icon { color: var(--ok); }
+.check-row.bad > .icon { color: var(--warn); }
+.check-row > .spinner { margin-top: 2px; }
+.check-text { display: grid; gap: 4px; min-width: 0; }
+.check-text p { color: var(--ink-soft); overflow-wrap: anywhere; }
+.facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; margin: 8px 0 0; font-size: 0.8rem; }
+.facts dt { color: var(--ink-soft); font-weight: 700; }
+.facts dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+.report { width: 100%; min-height: 160px; padding: 12px; border-radius: 12px; border: 1.5px solid var(--line); background: var(--surface); font: 0.8rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
 /* Settings */
 .section-label { font-size: 0.8rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); padding: 0 4px; }
 .account { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 4px 14px; align-items: center; padding: 16px 18px; }
