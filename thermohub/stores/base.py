@@ -2,14 +2,18 @@
 
 import asyncio
 from collections.abc import Iterable
+from contextlib import AbstractAsyncContextManager
 import logging
 import re
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from curl_cffi.requests import AsyncSession, RequestsError, Response
 
 from thermohub.models import Deal, StoreId, StoreProduct, UnitPrice
+
+if TYPE_CHECKING:
+    from playwright.async_api import Page
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,22 +32,45 @@ class StoreBlocked(StoreError):
     """The store's bot protection rejected the request."""
 
 
+class StoreUnreadable(StoreError):
+    """The store answered with something that can't be read as search results."""
+
+
+class BrowserPages(Protocol):
+    def page(self, store_id: str) -> AbstractAsyncContextManager["Page"]: ...
+
+
+# After plain requests are blocked, search in the browser for this long.
+BROWSER_SECONDS = 1800
+
+
 class Store:
     """Product search against one supermarket's website.
 
     Subclasses implement ``_search``. A session first loads the home page
     so the bot-protection cookies are set, as a browser would; when a
-    search is blocked anyway the session is rebuilt once before giving up.
-    Results are cached so the status check and repeated comparisons don't
-    hit the store again.
+    search is blocked anyway the session is rebuilt once. If it's still
+    blocked and Thermohub's browser is available (``browsers``), the search
+    is done in the browser instead (``search_in_browser``), which runs the
+    store's bot checks like any browser; searches stay in the browser for
+    a while after that. Results are cached so the status check and repeated
+    comparisons don't hit the store again.
     """
 
     id: StoreId
     name: str
     home_url: str
 
-    def __init__(self, base_url: str | None = None, cache_seconds: float = 1800) -> None:
+    def __init__(
+        self,
+        base_url: str | None = None,
+        cache_seconds: float = 1800,
+        browsers: BrowserPages | None = None,
+    ) -> None:
         self.base_url = (base_url or self.home_url).rstrip("/")
+        self._browsers = browsers
+        self._browser_gate = asyncio.Semaphore(2)  # pages are heavier than requests
+        self._browser_until = 0.0
         self._cache_seconds = cache_seconds
         self._cache: dict[str, tuple[float, list[StoreProduct]]] = {}
         self._session: AsyncSession | None = None
@@ -58,15 +85,48 @@ class Store:
         if cached and time.monotonic() - cached[0] < self._cache_seconds:
             return cached[1]
         async with self._concurrency:
-            session = await self._get_session()
-            try:
-                products = await self._search(session, term)
-            except StoreBlocked:
-                _LOGGER.info("%s blocked a search; retrying with a fresh session", self.name)
-                await self._reset_session(session)
-                products = await self._search(await self._get_session(), term)
+            if self._browsers and time.monotonic() < self._browser_until:
+                products = await self._search_with_browser(term)
+            else:
+                try:
+                    products = await self.search_plainly(term)
+                except (StoreBlocked, StoreUnreadable) as e:
+                    if not self._browsers:
+                        raise
+                    _LOGGER.info("%s: %s. Searching in the browser instead.", self.name, e)
+                    products = await self._search_with_browser(term)
+                    self._browser_until = time.monotonic() + BROWSER_SECONDS
         self._cache[key] = (time.monotonic(), products)
         return products
+
+    async def search_plainly(self, term: str) -> list[StoreProduct]:
+        """Search with ordinary requests (no browser), retrying once on a fresh session."""
+        session = await self._get_session()
+        try:
+            return await self._search(session, term)
+        except StoreBlocked:
+            _LOGGER.info("%s blocked a search; retrying with a fresh session", self.name)
+            await self._reset_session(session)
+            return await self._search(await self._get_session(), term)
+
+    async def search_in_browser(self, page: "Page", term: str) -> list[StoreProduct]:
+        """Search in a page of Thermohub's browser."""
+        raise NotImplementedError
+
+    async def _search_with_browser(self, term: str) -> list[StoreProduct]:
+        assert self._browsers is not None
+        async with self._browser_gate:
+            try:
+                async with self._browsers.page(self.id) as page:
+                    return await self.search_in_browser(page, term)
+            except StoreError:
+                raise
+            except Exception as e:  # the browser itself failed
+                _LOGGER.warning("Searching %s in the browser failed", self.name, exc_info=True)
+                reason = str(e).splitlines()[0][:200]
+                raise StoreError(
+                    f"Couldn't search {self.name} in Thermohub's browser: {reason}"
+                ) from e
 
     async def close(self) -> None:
         await self._reset_session()

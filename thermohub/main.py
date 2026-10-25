@@ -81,9 +81,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     client = CookidooClient(get_settings())
     await client.start()
     app.state.cookidoo = client
-    app.state.stores = [Woolworths(), Coles()]
+    browsers = Browsers(get_settings().data_dir, get_settings().chromium)
+    app.state.browsers = browsers
+    # The stores search in the browser when their bot protection blocks plain requests.
+    app.state.stores = [Woolworths(browsers=browsers), Coles(browsers=browsers)]
     app.state.preferences = Preferences(get_settings().preferences_file)
-    app.state.browsers = Browsers(get_settings().data_dir, get_settings().chromium)
     app.state.sites = SITES
     app.state.cart_jobs = {}
     app.state.comparisons = {}

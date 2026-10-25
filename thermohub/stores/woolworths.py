@@ -2,13 +2,35 @@
 
 from collections.abc import Iterator, Mapping
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from curl_cffi.requests import AsyncSession
 
 from thermohub.models import StoreProduct
-from thermohub.stores.base import Store, StoreError, deal, unit_price
+from thermohub.stores.base import (
+    BLOCKED_STATUSES,
+    Store,
+    StoreBlocked,
+    StoreError,
+    StoreUnreadable,
+    deal,
+    unit_price,
+)
+
+if TYPE_CHECKING:
+    from playwright.async_api import Page
+
+# Calls the search API from inside a woolworths.com.au page, with its cookies.
+_FETCH = """async ([url, body]) => {
+  const response = await fetch(url, {
+    method: "POST",
+    credentials: "include",
+    headers: {"Content-Type": "application/json", "Accept": "application/json, text/plain, */*"},
+    body: JSON.stringify(body),
+  });
+  return {status: response.status, text: await response.text()};
+}"""
 
 SITE = "https://www.woolworths.com.au"
 
@@ -23,19 +45,7 @@ class Woolworths(Store):
             session,
             "POST",
             f"{self.base_url}/apis/ui/Search/products",
-            json={
-                "searchTerm": term,
-                "pageNumber": 1,
-                # A full page, so every size and brand of the item is there to choose from.
-                "pageSize": 36,
-                "sortType": "TraderRelevance",
-                "isSpecial": False,
-                "isBundle": False,
-                "isMobile": False,
-                "filters": [],
-                "location": f"/shop/search/products?searchTerm={quote(term)}",
-                "formatObject": json.dumps({"name": term}),
-            },
+            json=_request_body(term),
             headers={
                 "Accept": "application/json, text/plain, */*",
                 "Origin": self.base_url,
@@ -45,8 +55,44 @@ class Woolworths(Store):
         try:
             data = response.json()
         except ValueError as e:
-            raise StoreError("Woolworths sent something other than search results") from e
+            raise StoreUnreadable("Woolworths sent something other than search results") from e
         return parse_search(data)
+
+    async def search_in_browser(self, page: "Page", term: str) -> list[StoreProduct]:
+        # The same search, made by the woolworths.com.au page itself, so the
+        # bot protection sees a browser it has already checked.
+        if not page.url.startswith(self.base_url):
+            await page.goto(f"{self.base_url}/", wait_until="domcontentloaded", timeout=45_000)
+        result = await page.evaluate(
+            _FETCH, [f"{self.base_url}/apis/ui/Search/products", _request_body(term)]
+        )
+        status = result["status"]
+        if status in BLOCKED_STATUSES:
+            raise StoreBlocked(
+                f"Woolworths blocked the search in Thermohub's browser too (HTTP {status})"
+            )
+        if status >= 400:
+            raise StoreError(f"Woolworths returned HTTP {status}")
+        try:
+            return parse_search(json.loads(result["text"]))
+        except ValueError as e:
+            raise StoreUnreadable("Woolworths sent something other than search results") from e
+
+
+def _request_body(term: str) -> dict[str, Any]:
+    return {
+        "searchTerm": term,
+        "pageNumber": 1,
+        # A full page, so every size and brand of the item is there to choose from.
+        "pageSize": 36,
+        "sortType": "TraderRelevance",
+        "isSpecial": False,
+        "isBundle": False,
+        "isMobile": False,
+        "filters": [],
+        "location": f"/shop/search/products?searchTerm={quote(term)}",
+        "formatObject": json.dumps({"name": term}),
+    }
 
 
 def parse_search(data: Mapping[str, Any]) -> list[StoreProduct]:

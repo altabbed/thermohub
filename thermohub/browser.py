@@ -11,7 +11,8 @@ back. Filling a cart opens each product page and presses the store's own
 
 import asyncio
 import base64
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 import json
 import logging
@@ -22,7 +23,7 @@ import subprocess
 import time
 from typing import Any
 
-from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
+from playwright.async_api import BrowserContext, Page, Playwright, Route, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
 _LOGGER = logging.getLogger(__name__)
@@ -77,6 +78,7 @@ class Browsers:
         self._start_lock = asyncio.Lock()
         self._locks: dict[str, asyncio.Lock] = {}
         self._idle: dict[str, asyncio.TimerHandle] = {}
+        self._pages_open: dict[str, int] = {}
 
     def lock(self, store_id: str) -> asyncio.Lock:
         """Held while signing in or filling a cart, so the two never share a page."""
@@ -112,9 +114,32 @@ class Browsers:
             self._contexts[store_id] = context
             return context
 
+    @asynccontextmanager
+    async def page(self, store_id: str) -> AsyncIterator[Page]:
+        """A page in the store's browser for a quick job (a search, a check), closed after.
+
+        Pictures, videos and fonts aren't downloaded: they're slow and not needed.
+        """
+        self._pages_open[store_id] = self._pages_open.get(store_id, 0) + 1
+        try:
+            page = await (await self.context(store_id)).new_page()
+            try:
+                await page.route("**/*", _skip_heavy)
+                yield page
+            finally:
+                try:
+                    await page.close()
+                except PlaywrightError:
+                    pass  # the browser closed under it
+        finally:
+            self._pages_open[store_id] -= 1
+            self.release(store_id)
+
     def release(self, store_id: str) -> None:
         """Close the store's browser once it has been idle for a while (it uses memory)."""
         self._cancel_idle(store_id)
+        if self._pages_open.get(store_id):
+            return  # still in use; the last page out schedules it
         loop = asyncio.get_running_loop()
         self._idle[store_id] = loop.call_later(
             self._idle_seconds, lambda: asyncio.ensure_future(self._close_context(store_id))
@@ -180,6 +205,13 @@ class Browsers:
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
             f"Chrome/{major}.0.0.0 Safari/537.36"
         )
+
+
+async def _skip_heavy(route: Route) -> None:
+    if route.request.resource_type in ("image", "media", "font"):
+        await route.abort()
+    else:
+        await route.continue_()
 
 
 async def looks_signed_out(page: Page) -> bool:

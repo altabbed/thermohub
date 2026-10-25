@@ -3,12 +3,16 @@
 from collections.abc import Mapping
 import json
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from curl_cffi.requests import AsyncSession
 
 from thermohub.models import Deal, StoreProduct
-from thermohub.stores.base import Store, StoreBlocked, StoreError, deal, unit_price
+from thermohub.stores.base import Store, StoreBlocked, StoreUnreadable, deal, unit_price
+
+if TYPE_CHECKING:
+    from playwright.async_api import Page
 
 SITE = "https://www.coles.com.au"
 IMAGES = "https://productimages.coles.com.au/productimages"
@@ -30,14 +34,38 @@ class Coles(Store):
         html = response.text
         match = _NEXT_DATA_RE.search(html)
         if match is None:
-            if "incapsula" in html.lower():
+            if "incapsula" in html.lower() or "_incapsula_resource" in html.lower():
                 raise StoreBlocked("Coles' bot protection answered with a challenge page")
-            raise StoreError("Coles' search page has changed and can't be read")
+            raise StoreUnreadable("Coles' search page has changed and can't be read")
+        return parse_results(page_results(match.group(1)))
+
+    async def search_in_browser(self, page: "Page", term: str) -> list[StoreProduct]:
+        # A real browser passes the bot check (it runs a script, then reloads
+        # into the page), and the results are in the same embedded data.
+        await page.goto(
+            f"{self.base_url}/search/products?q={quote(term)}",
+            wait_until="domcontentloaded",
+            timeout=45_000,
+        )
         try:
-            results = json.loads(match.group(1))["props"]["pageProps"]["searchResults"]["results"]
-        except (ValueError, KeyError, TypeError) as e:
-            raise StoreError("Coles' search page has changed and can't be read") from e
-        return parse_results(results)
+            data = await page.wait_for_selector(
+                "script#__NEXT_DATA__", state="attached", timeout=25_000
+            )
+        except Exception as e:
+            title = await page.title()
+            raise StoreBlocked(
+                f"Coles' search page didn't load in Thermohub's browser either "
+                f'(it showed "{title[:80]}")'
+            ) from e
+        return parse_results(page_results(await data.text_content() or ""))
+
+
+def page_results(next_data: str) -> list[Any]:
+    """The search results in a Coles search page's embedded Next.js data."""
+    try:
+        return json.loads(next_data)["props"]["pageProps"]["searchResults"]["results"]
+    except (ValueError, KeyError, TypeError) as e:
+        raise StoreUnreadable("Coles' search page has changed and can't be read") from e
 
 
 def parse_results(results: list[Any]) -> list[StoreProduct]:
