@@ -262,7 +262,7 @@ a.pname:hover { text-decoration: underline; }
 .tag { display: inline-flex; align-items: center; gap: 4px; padding: 2px 9px 2px 7px; border-radius: 999px; font-size: 0.8rem; font-weight: 700; background: var(--sunk); color: var(--ink-soft); }
 .tag .icon { width: 0.95em; height: 0.95em; }
 .tag.usual { background: color-mix(in srgb, var(--cookidoo) 14%, transparent); color: var(--cookidoo); }
-.tag.value, .tag.special { background: var(--save-soft); color: var(--save-ink); }
+.tag.value, .tag.special, .tag.deal { background: var(--save-soft); color: var(--save-ink); }
 .tag.check { background: var(--warn-soft); color: var(--warn); }
 
 /* How many */

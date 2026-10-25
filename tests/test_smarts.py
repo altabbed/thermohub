@@ -1,10 +1,12 @@
 import pytest
 
-from thermohub.models import Quantity, StoreProduct, UnitPrice
+from thermohub.models import Deal, Quantity, StoreProduct, UnitPrice
 from thermohub.smarts import (
     Preferences,
     choose,
     common_amount,
+    cost_of,
+    each_grams,
     good_match,
     holds,
     item_key,
@@ -14,8 +16,11 @@ from thermohub.smarts import (
 )
 
 
-def product(pid, name, price, size=None, unit=None, special=False):
+def product(pid, name, price, size=None, unit=None, special=False, deal=None):
     return StoreProduct(
+        deal=Deal(quantity=deal[0], price=deal[1], text=f"{deal[0]} for ${deal[1]:g}")
+        if deal
+        else None,
         store="woolworths",
         id=pid,
         name=name,
@@ -48,6 +53,9 @@ def test_need_adds_up_known_units():
         ("each", "Garlic", {"count": 1}),
         ("12 pack", "Free Range Eggs", {"count": 12}),
         (None, "Coconut Milk 400ml", {"mass": 400}),
+        ("approx 170g", "Coles Bananas", {"count": 1, "mass": 170}),
+        ("each", "Brown Onion approx. 150g", {"count": 1, "mass": 150}),
+        ("approximately 1.2kg", "Butternut Pumpkin", {"count": 1, "mass": 1200}),
     ],
 )
 def test_holds(size, name, expected):
@@ -218,3 +226,66 @@ def test_preferences_survive_a_restart(tmp_path):
     assert Preferences(path).usual_packs("coles", "ref:x") is None
     assert Preferences(path).usual("woolworths", "ref:x") is None
     assert Preferences(path).usual_packs("coles", "name:toilet paper") == 2
+
+
+def bananas():
+    return [
+        product("loose", "Coles Bananas", 0.68, "approx 170g", unit=(4.00, "kg")),
+        product("mini", "Coles Mini Bananas Prepacked", 3.50, "750g"),
+        product("organic", "Coles Organic Bananas", 6.00, "1kg"),
+        product("bread", "Coles Banana Bread", 5.00, "450g"),
+    ]
+
+
+def test_each_grams_is_the_typical_single_item():
+    assert each_grams(bananas()) == 170
+    assert each_grams([product("bag", "Bananas", 4.0, "1kg")]) is None
+
+
+def test_bananas_are_counted_not_weighed():
+    loose, mini, organic, bread = choose("bananas", {"count": 3}, bananas())
+
+    assert (loose.id, loose.packs, loose.cost) == ("loose", 3, 2.04)
+    assert loose.value.text == "$0.68 each"
+    assert loose.tags == ["best_value"]
+    # The bags' counts are estimated from a loose banana's weight.
+    assert (mini.holds, mini.estimated, mini.packs, mini.cost) == (
+        {"mass": 750, "count": 4},
+        True,
+        1,
+        3.50,
+    )
+    assert (organic.holds["count"], organic.value.text) == (6, "$1.00 each")
+    assert (bread.good_match, bread.estimated) == (False, False)
+
+
+def test_more_bananas_than_a_bag_holds():
+    ranked = choose("bananas", {"count": 8}, bananas())
+
+    assert [(c.id, c.packs, c.cost) for c in ranked[:3]] == [
+        ("loose", 8, 5.44),
+        ("mini", 2, 7.00),
+        ("organic", 2, 12.00),
+    ]
+
+
+def test_cost_of_counts_multi_buy_deals():
+    pasta = product("p", "Agnolotti", 8.00, "375g", deal=(2, 13.00))
+
+    assert [cost_of(pasta, n) for n in (1, 2, 3, 4)] == [8.00, 13.00, 21.00, 26.00]
+
+
+def test_deal_tag_and_deal_prices_in_the_pick():
+    products = [
+        product("deal", "Agnolotti Spinach", 8.00, "375g", deal=(2, 13.00)),
+        product("plain", "Agnolotti Spinach", 7.00, "375g"),
+    ]
+
+    ranked = choose("agnolotti", {"mass": 700}, products)
+
+    # Two of each are needed: $13 with the deal beats $14, and is the better value.
+    assert [(c.id, c.packs, c.cost, c.tags) for c in ranked] == [
+        ("deal", 2, 13.00, ["deal", "best_value"]),
+        ("plain", 2, 14.00, []),
+    ]
+    assert ranked[0].value.text == "$17.33 per kg"

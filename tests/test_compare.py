@@ -201,6 +201,41 @@ async def test_unmeasured_items_are_priced_for_the_same_amount_everywhere():
     assert item.cheaper == "coles"
 
 
+@pytest.mark.anyio
+async def test_bananas_are_priced_by_the_banana_at_both_stores():
+    woolworths = FakeStore(
+        "woolworths",
+        {
+            "bananas": [
+                product("woolworths", "w-each", 0.80, "Woolworths Cavendish Bananas", "each"),
+                product("woolworths", "w-bag", 4.00, "Woolworths Bananas Prepacked", "1kg"),
+            ]
+        },
+    )
+    coles = FakeStore(
+        "coles",
+        {
+            "bananas": [
+                product("coles", "c-loose", 0.68, "Coles Bananas", "approx 170g"),
+                product("coles", "c-bag", 3.50, "Coles Mini Bananas Prepacked", "750g"),
+            ]
+        },
+    )
+    request = [
+        CompareRequestItem(name="bananas", quantities=[Quantity(amount=2, amount_max=3, unit="")])
+    ]
+
+    [item] = (await compare(request, [woolworths, coles])).items
+
+    assert (item.amount.kind, item.amount.value) == ("count", 3)
+    w, c = item.matches["woolworths"].candidates, item.matches["coles"].candidates
+    assert (w[0].id, w[0].packs, w[0].cost) == ("w-each", 3, 2.40)
+    assert (c[0].id, c[0].packs, c[0].cost) == ("c-loose", 3, 2.04)
+    # Woolworths' bag is counted with Coles' loose banana weight: about 6.
+    assert (w[1].holds["count"], w[1].estimated) == (6, True)
+    assert item.cheaper == "coles"
+
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"

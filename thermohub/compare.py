@@ -23,6 +23,7 @@ from thermohub.smarts import (
     Preferences,
     choose,
     common_amount,
+    each_grams,
     good_match,
     item_key,
     need,
@@ -95,10 +96,13 @@ def _pick(
     key: str,
     preferences: Preferences | None,
 ) -> dict[StoreId, StoreMatch]:
-    # Value is judged on one basis (per item or per kg) at every store.
+    # Value is judged on one basis (per item or per kg) at every store, and
+    # bags are counted with the same typical item weight.
     term = next(iter(results.values())).term
     pooled = [p for r in results.values() for p in r.products[:POOL]]
-    basis = value_basis(needs, [p for p in pooled if good_match(term, p.name)] or pooled)
+    good = [p for p in pooled if good_match(term, p.name)]
+    typical = each_grams(good)
+    basis = value_basis(needs, good or pooled, typical)
     return {
         store_id: StoreMatch(
             search_term=r.term,
@@ -109,6 +113,7 @@ def _pick(
                 preferences.usual(store_id, key) if preferences else None,
                 preferences.usual_packs(store_id, key) if preferences else None,
                 basis,
+                typical,
             ),
             error=r.error,
         )

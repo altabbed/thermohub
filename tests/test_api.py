@@ -338,6 +338,20 @@ def test_store_accounts():
     ]
 
 
+def test_store_search():
+    stores = [
+        FakeStore("woolworths", {"milk": [product("woolworths", "w-milk", 3.10)]}),
+        FakeStore("coles", {}, fail="Coles blocked the request (HTTP 403)"),
+    ]
+    client = make_client(stores=stores)
+
+    found = client.get("/api/stores/woolworths/search", params={"q": "milk"})
+    assert [p["id"] for p in found.json()] == ["w-milk"]
+    assert client.get("/api/stores/coles/search", params={"q": "milk"}).status_code == 502
+    assert client.get("/api/stores/aldi/search", params={"q": "milk"}).status_code == 404
+    assert client.get("/api/stores/coles/search").status_code == 422
+
+
 def test_store_sign_out():
     browsers = FakeBrowsers(signed_in=["coles"])
     client = make_client(browsers=browsers)

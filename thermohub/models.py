@@ -67,6 +67,14 @@ class UnitPrice(BaseModel):
     text: str = Field(description='As the store shows it, e.g. "$13.57 per 1kg".')
 
 
+class Deal(BaseModel):
+    """A multi-buy offer: `quantity` of the product for `price` together."""
+
+    quantity: int = Field(ge=2)
+    price: float = Field(gt=0, description="What `quantity` of them cost together.")
+    text: str = Field(description='As the store words it, e.g. "Pick any 2 for $13".')
+
+
 class StoreProduct(BaseModel):
     store: StoreId
     id: str = Field(description="The store's product id (Woolworths stockcode, Coles id).")
@@ -76,30 +84,36 @@ class StoreProduct(BaseModel):
     was_price: float | None = None
     on_special: bool = False
     unit_price: UnitPrice | None = None
+    deal: Deal | None = None
     image: str | None = None
     url: str
 
 
-Tag = Literal["usual", "best_value", "special"]
+Tag = Literal["usual", "best_value", "special", "deal"]
 
 
 class Candidate(StoreProduct):
     """A product that could be bought for an ingredient, priced for the amount needed."""
 
     packs: int = Field(default=1, description="How many to buy to cover the recipes.")
-    cost: float = Field(description="Price for that many.")
+    cost: float = Field(description="Price for that many, with any multi-buy deal they meet.")
     good_match: bool = Field(
         description="Has every word of the ingredient and isn't a different product."
     )
     tags: list[Tag] = Field(
         default_factory=list,
         description="usual: picked last time; best_value: lowest price per kg/L/each among "
-        "real matches; special: on special.",
+        "real matches; special: on special; deal: has a multi-buy deal.",
     )
     holds: dict[Literal["mass", "count"], float] = Field(
         default_factory=dict,
         description="What one holds, read from its size: grams (or ml) and/or a count "
-        "(24 for a 24 pack).",
+        "(24 for a 24 pack; 1 for a single item of about 170 g).",
+    )
+    estimated: bool = Field(
+        default=False,
+        description="The count is a guess from the weight: a 1 kg bag of bananas holds "
+        "about 6 when loose ones weigh about 170 g.",
     )
     value: UnitPrice | None = Field(
         default=None,

@@ -17,6 +17,7 @@ from fastapi import (
     Depends,
     FastAPI,
     HTTPException,
+    Query,
     Request,
     Response,
     Security,
@@ -57,6 +58,7 @@ from thermohub.models import (
     SignInRequest,
     Status,
     StoreAccount,
+    StoreProduct,
 )
 from thermohub.shopping_list import build_shopping_list
 from thermohub.smarts import Preferences
@@ -242,6 +244,25 @@ async def get_store_accounts(
         )
         for site in sites.values()
     ]
+
+
+@api.get("/stores/{store_id}/search", response_model=list[StoreProduct])
+async def search_store(
+    store_id: str,
+    q: Annotated[str, Query(min_length=1, max_length=100)],
+    stores: Annotated[list[Store], Depends(get_stores)],
+) -> list[StoreProduct]:
+    """What Thermohub reads from a store's search for these words, in the store's order.
+
+    For checking a comparison against the store's own website.
+    """
+    store = next((s for s in stores if s.id == store_id), None)
+    if store is None:
+        raise HTTPException(status_code=404, detail="No such store.")
+    try:
+        return await store.search(q)
+    except StoreError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
 
 
 @api.post("/stores/{store_id}/sign-out", status_code=204)

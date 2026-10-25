@@ -87,17 +87,20 @@ def test_parse_woolworths_keeps_every_size():
 def test_parse_coles():
     products = parse_results(
         [
-            coles_product(5134236, "Coles", "Brown Onions", 4.00, size="1kg"),
             coles_product(9999, "Sponsored", "Onion Rings", 3.00, ad="ad-123"),
+            coles_product(5134236, "Coles", "Brown Onions", 4.00, size="1kg"),
             {"_type": "SINGLE_TILE", "id": "banner"},
             coles_product(1111, "Coles", "Sold Out Onions", 2.00, available=False),
             coles_product(
                 2222, "Coles", "Garlic", 1.00, was=1.40, size="100g", unit=(1.00, 100, "g")
             ),
+            coles_product(9999, "Sponsored", "Onion Rings", 3.00),  # listed again, unsponsored
         ]
     )
 
-    assert [p.id for p in products] == ["5134236", "2222"]
+    # Sponsored products are real products and stay, once each.
+    assert [p.id for p in products] == ["9999", "5134236", "2222"]
+    products = products[1:]
     onions, garlic = products
     assert onions.name == "Coles Brown Onions"
     assert onions.size == "1kg"
@@ -108,6 +111,44 @@ def test_parse_coles():
     assert garlic.was_price == 1.40
     assert (garlic.unit_price.price, garlic.unit_price.per) == (10.0, "kg")
     assert garlic.unit_price.text == "$1.00 per 100g"
+
+
+def test_parse_coles_bananas_and_deals():
+    loose, mini, organic, pasta = parse_results(
+        [
+            coles_product(
+                409499, "Coles", "Bananas", 0.68, size="approx 170g", unit=(4.00, 1, "kg")
+            ),
+            coles_product(5555, "Coles", "Mini Bananas Prepacked", 3.50, size="750g"),
+            coles_product(6666, "Coles", "Organic Bananas", 6.00, size="1kg"),
+            coles_product(7777, "Latina", "Fresh Agnolotti", 8.00, size="375g", multibuy=(2, 13)),
+        ]
+    )
+
+    assert (loose.name, loose.size, loose.price) == ("Coles Bananas", "approx 170g", 0.68)
+    assert (mini.deal, organic.deal) == (None, None)
+    assert (pasta.deal.quantity, pasta.deal.price, pasta.deal.text) == (
+        2,
+        13.0,
+        "Pick any 2 for $13",
+    )
+
+
+@pytest.mark.parametrize(
+    ("tag", "price", "deal"),
+    [
+        ('<div class="multibuy">2 for $10</div>', 6.00, (2, 10.0, "2 for $10")),
+        ("Any 3 for $12.50", 5.00, (3, 12.5, "Any 3 for $12.50")),
+        ("2 for $12", 6.00, None),  # no saving: not a deal
+        ("Save $1.00", 6.00, None),
+        (None, 6.00, None),
+    ],
+)
+def test_parse_woolworths_deals(tag, price, deal):
+    [product] = parse_search(woolworths_search(woolworths_product(1, "Pasta", price, tag=tag)))
+
+    found = product.deal and (product.deal.quantity, product.deal.price, product.deal.text)
+    assert found == deal
 
 
 class FakeSupermarket:

@@ -8,7 +8,7 @@ from urllib.parse import quote
 from curl_cffi.requests import AsyncSession
 
 from thermohub.models import StoreProduct
-from thermohub.stores.base import Store, StoreError, unit_price
+from thermohub.stores.base import Store, StoreError, deal, unit_price
 
 SITE = "https://www.woolworths.com.au"
 
@@ -73,11 +73,21 @@ def parse_search(data: Mapping[str, Any]) -> list[StoreProduct]:
                 unit_price=unit_price(
                     raw.get("CupPrice"), raw.get("CupMeasure"), raw.get("CupString")
                 ),
+                deal=deal(price, texts=_promotion_texts(raw)),
                 image=raw.get("MediumImageFile") or raw.get("SmallImageFile") or None,
                 url=f"{SITE}/shop/productdetails/{stockcode}/{raw.get('UrlFriendlyName') or ''}",
             )
         )
     return products
+
+
+def _promotion_texts(raw: Mapping[str, Any]) -> Iterator[Any]:
+    """The words on the product's promotion labels, where a "2 for $10" shows."""
+    yield raw.get("PromotionDescription")
+    for tag in ("CentreTag", "HeaderTag", "ImageTag"):
+        label = raw.get(tag)
+        if isinstance(label, Mapping):
+            yield from label.values()
 
 
 def _products(data: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:

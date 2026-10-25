@@ -499,9 +499,16 @@ function qty(i, storeId) {
   return data.qty[i][storeId] || (p ? p.packs : 1);
 }
 
+// What n of a product cost, with its multi-buy deal for each full set of them.
+function costOf(p, n) {
+  const deal = p.deal;
+  if (deal && n >= deal.quantity) return round2(Math.floor(n / deal.quantity) * deal.price + (n % deal.quantity) * p.price);
+  return round2(p.price * n);
+}
+
 function cost(i, storeId) {
   const p = pick(i, storeId);
-  return p ? round2(p.price * qty(i, storeId)) : null;
+  return p ? costOf(p, qty(i, storeId)) : null;
 }
 
 // How many of a product cover an amount (null when its size can't be read).
@@ -570,7 +577,7 @@ function retarget(i, from) {
     const same = options.filter((o) => sameLine(o.c, source));
     let best = null;
     (same.length ? same : options).forEach(({ c, j, n }) => {
-      if (!best || c.price * n < best.cost - 0.001) best = { j, n, cost: c.price * n };
+      if (!best || costOf(c, n) < best.cost - 0.001) best = { j, n, cost: costOf(c, n) };
     });
     if (best) {
       data.picks[i][store.id] = best.j;
@@ -630,7 +637,7 @@ function cheaperSameAmount(i, storeId) {
   let best = null;
   data.comparison.items[i].matches[storeId].candidates.forEach((c, j) => {
     const n = c.good_match && sameLine(c, current) && coverPacks(c, amount);
-    if (n && (!best || c.price * n < best.cost - 0.001)) best = { j, n, cost: round2(c.price * n), cand: c };
+    if (n && (!best || costOf(c, n) < best.cost - 0.001)) best = { j, n, cost: costOf(c, n), cand: c };
   });
   if (!best || best.cand.id === current.id || cost(i, storeId) - best.cost < 0.5) return null;
   return best;
@@ -838,19 +845,25 @@ const TAGS = {
 };
 
 function tags(p, withCheck = false) {
-  const list = p.tags.map((t) => TAGS[t]).filter(Boolean)
+  const list = p.tags.map((t) => (t === "deal" && p.deal ? { label: p.deal.text, icon: "tag", class: "deal" } : TAGS[t]))
+    .filter(Boolean)
     .map((t) => el("span", { class: `tag ${t.class}` }, icon(t.icon), t.label));
   if (withCheck && !p.good_match) list.push(el("span", { class: "tag check" }, icon("warn"), "Check this is right"));
   return list.length ? el("span", { class: "tags" }, list) : null;
 }
 
-const timesPrice = (p, n) => (n > 1 ? `${n} × ${money.format(p.price)}` : money.format(p.price));
+function timesPrice(p, n) {
+  if (p.deal && n >= p.deal.quantity) return `${n} for ${money.format(costOf(p, n))}`;
+  return n > 1 ? `${n} × ${money.format(p.price)}` : money.format(p.price);
+}
 
 // Size (unless the name says it) and the price per item or kilo.
 function productMeta(p) {
-  const size = p.size && p.size.toLowerCase() !== "each" && !p.name.toLowerCase().includes(p.size.toLowerCase()) ? p.size : null;
+  let size = p.size && p.size.toLowerCase() !== "each" && !p.name.toLowerCase().includes(p.size.toLowerCase()) ? p.size : null;
+  if (p.estimated && p.holds.count) size = `${size || "a pack"}, about ${p.holds.count}`;
   const value = p.value || p.unit_price;
-  return [size, value && value.text].filter(Boolean).join(" · ");
+  const valueText = value && (p.estimated && value.per === "each" ? `about ${value.text}` : value.text);
+  return [size, valueText].filter(Boolean).join(" · ");
 }
 
 function stepper(i, storeId, redraw) {
@@ -874,7 +887,7 @@ function itemRow(item, i, redraw) {
 
   let product;
   let howMany = null;
-  let tip = null;
+  const tips = [];
   if (p) {
     const url = safeUrl(p.url);
     product = el("div", { class: "product" },
@@ -884,9 +897,19 @@ function itemRow(item, i, redraw) {
         el("p", { class: "meta" }, [timesPrice(p, qty(i, s)), productMeta(p)].filter(Boolean).join(" · ")),
         tags(p, true)));
     howMany = el("div", { class: "qty-row" }, el("span", { class: "qty-label" }, "How many"), stepper(i, s, redraw));
+    const n = qty(i, s);
+    if (p.deal && n < p.deal.quantity) {
+      const more = p.deal.quantity - n;
+      tips.push(el("div", { class: "tip-line" }, icon("tag"),
+        el("span", {}, `${p.deal.text}: ${more === 1 ? "one" : more} more for ${money.format(costOf(p, p.deal.quantity) - costOf(p, n))}, saving ${money.format(p.price * p.deal.quantity - p.deal.price)}.`),
+        el("button", { class: "button secondary small", type: "button", onclick: () => {
+          setQty(i, s, p.deal.quantity);
+          redraw();
+        } }, `Make it ${p.deal.quantity}`)));
+    }
     const better = cheaperSameAmount(i, s);
     if (better) {
-      tip = el("div", { class: "tip-line" }, icon("bulb"),
+      tips.push(el("div", { class: "tip-line" }, icon("bulb"),
         el("span", {}, `${better.n > 1 ? `${better.n} × ` : "The "}${better.cand.size || better.cand.name} gets you the same for ${money.format(cost(i, s) - better.cost)} less.`),
         el("button", { class: "button secondary small", type: "button", onclick: () => {
           data.picks[i][s] = better.j;
@@ -894,7 +917,7 @@ function itemRow(item, i, redraw) {
           data.qty[i][s] = better.n;
           remember(i, s);
           redraw();
-        } }, "Switch"));
+        } }, "Switch")));
     }
   } else {
     const has = STORES.filter((x) => pick(i, x.id));
@@ -936,7 +959,7 @@ function itemRow(item, i, redraw) {
     product,
     howMany,
     where,
-    tip,
+    tips,
     toggle,
     open && s ? choices(item, i, s, source, redraw) : null);
 }
@@ -949,7 +972,7 @@ function choices(item, i, storeId, source, redraw) {
   const all = item.matches[storeId].candidates.map((cand, j) => ({ cand, j, n: packsFor(i, cand) }));
   const amount = data.amount[i];
   const byValue = (x, y) => (x.cand.value ? x.cand.value.price : Infinity) - (y.cand.value ? y.cand.value.price : Infinity) || x.cand.price - y.cand.price;
-  const byCost = (x, y) => x.cand.price * x.n - y.cand.price * y.n;
+  const byCost = (x, y) => costOf(x.cand, x.n) - costOf(y.cand, y.n);
   const good = all.filter((o) => o.cand.good_match).sort(amount ? byCost : byValue);
   const others = all.filter((o) => !o.cand.good_match);
   const showAll = data.showAll.has(i);
@@ -964,7 +987,7 @@ function choices(item, i, storeId, source, redraw) {
         el("span", { class: "pname" }, cand.name),
         el("span", { class: "meta" }, productMeta(cand)),
         tags(cand)),
-      el("span", { class: "choice-cost" }, money.format(round2(cand.price * n)),
+      el("span", { class: "choice-cost" }, money.format(costOf(cand, n)),
         n > 1 ? el("span", { class: "choice-times" }, timesPrice(cand, n)) : null));
     button.addEventListener("click", () => {
       selectProduct(i, storeId, j);

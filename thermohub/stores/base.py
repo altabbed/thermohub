@@ -1,6 +1,7 @@
 """Shared plumbing for supermarket product search."""
 
 import asyncio
+from collections.abc import Iterable
 import logging
 import re
 import time
@@ -8,7 +9,7 @@ from typing import Any
 
 from curl_cffi.requests import AsyncSession, RequestsError, Response
 
-from thermohub.models import StoreId, StoreProduct, UnitPrice
+from thermohub.models import Deal, StoreId, StoreProduct, UnitPrice
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -135,3 +136,37 @@ def unit_price(price: Any, measure: Any, text: Any) -> UnitPrice | None:
         per=per,
         text=text if isinstance(text, str) and text else f"${price:.2f} / {measure}",
     )
+
+
+_DEAL_TEXT = re.compile(r"(\d+)\s*for\s*\$\s*(\d+(?:\.\d{1,2})?)", re.IGNORECASE)
+_TAG = re.compile(r"<[^>]+>")
+
+
+def deal(
+    price: float, quantity: Any = None, total: Any = None, texts: Iterable[Any] = ()
+) -> Deal | None:
+    """A multi-buy offer: from the store's own numbers when they make sense,
+    else from its wording ("2 for $10", "Pick any 2 for $13"). None unless
+    buying that many actually costs less.
+    """
+    wording = next(
+        (
+            " ".join(_TAG.sub(" ", t).split())
+            for t in texts
+            if isinstance(t, str) and _DEAL_TEXT.search(t)
+        ),
+        None,
+    )
+
+    def make(q: Any, t: Any) -> Deal | None:
+        if not isinstance(q, int) or isinstance(q, bool) or q < 2:
+            return None
+        if not isinstance(t, int | float) or t <= 0 or t >= q * price - 0.005:
+            return None
+        return Deal(quantity=q, price=round(t, 2), text=wording or f"{q} for ${t:.2f}")
+
+    found = make(quantity, total)
+    if found is None and wording:
+        match = _DEAL_TEXT.search(wording)
+        found = make(int(match.group(1)), float(match.group(2)))  # type: ignore[union-attr]
+    return found

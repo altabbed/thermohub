@@ -3,9 +3,12 @@
 import json
 
 
-def woolworths_product(stockcode, name, price, *, was=None, size="1kg", cup=None, available=True):
+def woolworths_product(
+    stockcode, name, price, *, was=None, size="1kg", cup=None, available=True, tag=None
+):
     cup_price, cup_measure = cup or (price, "1KG")
     return {
+        "CentreTag": {"TagContent": tag, "TagLink": None, "TagType": "None"},
         "Stockcode": stockcode,
         "Name": name,
         "DisplayName": f"{name} {size}",
@@ -33,9 +36,23 @@ def woolworths_search(*tiles):
 
 
 def coles_product(
-    pid, brand, name, price, *, was=0, size="1kg", unit=None, available=True, ad=None
+    pid, brand, name, price, *, was=0, size="1kg", unit=None, available=True, ad=None, multibuy=None
 ):
     unit_price, measure_qty, measure_unit = unit or (price, 1, "kg")
+    promotion = {}
+    if multibuy:  # (quantity, total), shaped like Coles' "Pick any 2 for $13"
+        quantity, total = multibuy
+        promotion = {
+            "promotionType": "SPECIAL",
+            "specialType": "MULTI_SAVE",
+            "offerDescription": f"Pick any {quantity} for ${total:g}",
+            "multiBuyPromotion": {
+                "type": "MultibuyMultiSku",
+                "id": "727963885",
+                "minQuantity": quantity,
+                "reward": round(total / quantity, 2),
+            },
+        }
     return {
         "_type": "PRODUCT",
         "id": pid,
@@ -58,6 +75,7 @@ def coles_product(
             "comparable": f"${unit_price:.2f} per {measure_qty}{measure_unit}",
             "promotionType": "EVERYDAY",
             "onlineSpecial": False,
+            **promotion,
         },
     }
 

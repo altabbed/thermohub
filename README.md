@@ -21,6 +21,12 @@ as a Docker container on Unraid (or any Docker host) on your home network.
   best value per item or per kg. Both shops are priced for the same amount,
   so 24 rolls are compared with 24 rolls. You can change the product and how
   many, and Thermohub remembers both.
+- Counts things recipes count: loose fruit and veg sold one at a time
+  ("Coles Bananas, approx 170g") are priced per item (3 bananas = 3 × $0.68),
+  and bags are counted from that typical weight (a 1 kg bag is about 6).
+- Counts multi-buy deals ("Pick any 2 for $13"): a deal you meet is in the
+  price, and one you're short of is offered ("one more for $4.50, saving
+  $2.00", **Make it 2**).
 - Sends the items to your Woolworths and/or Coles cart. You sign in to the
   shops once, on their own websites, inside Thermohub.
 - Shows, in plain language, whether Cookidoo, Woolworths and Coles are
@@ -130,6 +136,10 @@ tap targets, and no technical wording unless they open **Details**.
   results. Small labels explain the picks: *You usually buy this*, *Best
   value* (lowest price per item or kg), *On special*, and *Check this is
   right* when no product clearly matched.
+- **Multi-buy deals:** products on a deal carry its label ("2 for $10").
+  When you're buying fewer than the deal needs, the item says what the rest
+  would cost and what it saves, with a **Make it 2** button; once you buy
+  enough, the deal price is what's added up.
 - **Same amount, same product:** changing the product or how many at one
   shop re-prices the other shop for the same amount, using the same brand
   when it has it (Quilton at both, not Quilton against a house brand). When
@@ -151,7 +161,6 @@ tap targets, and no technical wording unless they open **Details**.
   are working, with **Check again**.
 
 The headline totals compare like for like: only items both shops have.
-Multi-buy deals ("2 for $10") aren't counted yet; the shelf price is.
 
 ### Signing in to the shops and filling the cart
 
@@ -178,9 +187,15 @@ upgrades.
 
 - **Woolworths:** the JSON search API behind woolworths.com.au, a full page
   of 36 results. Its results group a product's sizes (12, 24 and 36 packs)
-  into one tile; every size is kept.
+  into one tile; every size is kept. Multi-buy deals are read from the
+  product's promotion labels ("2 for $10").
 - **Coles:** the data embedded in coles.com.au search pages. Prices are for
   Coles' default store, which can differ a little from your local store.
+  Sponsored products are kept (they're real products in Coles' own list,
+  once each), and multi-buy deals come from Coles' `multiBuyPromotion`.
+
+To see exactly what Thermohub reads from a shop for some words, open
+`/api/stores/coles/search?q=bananas` (or `woolworths`) on your Thermohub.
 
 Both sites block ordinary scripts, so requests go through
 [`curl_cffi`](https://github.com/lexiforest/curl_cffi), which looks like Chrome
@@ -319,9 +334,13 @@ For each item, `matches.<store>.candidates` holds up to 24 products: the
 pick first, then real matches (best for the money first), then the store's
 other results. Each has the store's details (name, size, price, was-price,
 unit price, image, link) plus `packs`, `cost` (price × packs), `good_match`,
-`tags` (`usual`, `best_value`, `special`), `holds` (grams and/or a count,
-read from the size) and `value` (price per item or per kg/L, on the same
-basis for every candidate of the item). The pick is the product remembered
+`tags` (`usual`, `best_value`, `special`, `deal`), `deal` (`quantity`,
+`price` for that many, `text`), `holds` (grams and/or a count, read from the
+size; an "approx 170g" item counts as one), `estimated` (the count was
+worked out from the weight and the typical single item) and `value` (price
+per item or per kg/L, on the same basis for every candidate of the item, at
+the deal price when the packs bought meet a deal). `cost` includes a deal
+the packs meet. The pick is the product remembered
 for that ingredient (with last time's count, for unmeasured items); else the
 cheapest good match for the amount needed; else, when there's no amount, the
 best-value good match; else the store's top result. `amount` is the amount
@@ -349,6 +368,8 @@ remembered the same way.
   `text`), `{"type": "result", "signed_in"}` and `{"type": "error",
   "message"}`. The page sends `tap` (`x`, `y`), `text`, `key`, `scroll`
   (`dy`), `back`, `restart`, `done` or `cancel`.
+- `GET /api/stores/{store}/search?q=…`: the products Thermohub reads from
+  the shop's search for those words, in the shop's order.
 - `POST /api/stores/{store}/sign-out`: forgets the shop sign-in.
 - `POST /api/carts` with `{"orders": [{"store", "lines": [{"product_id",
   "name", "url", "quantity", "key"}]}]}`: starts adding to the carts and

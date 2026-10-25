@@ -7,8 +7,8 @@ from typing import Any
 
 from curl_cffi.requests import AsyncSession
 
-from thermohub.models import StoreProduct
-from thermohub.stores.base import Store, StoreBlocked, StoreError, unit_price
+from thermohub.models import Deal, StoreProduct
+from thermohub.stores.base import Store, StoreBlocked, StoreError, deal, unit_price
 
 SITE = "https://www.coles.com.au"
 IMAGES = "https://productimages.coles.com.au/productimages"
@@ -42,14 +42,19 @@ class Coles(Store):
 
 def parse_results(results: list[Any]) -> list[StoreProduct]:
     products = []
+    seen = set()
     for raw in results:
-        # Skip sponsored placements and the banner tiles mixed into results.
-        if not isinstance(raw, Mapping) or raw.get("_type") != "PRODUCT" or raw.get("adId"):
+        # Skip the banner tiles mixed into results. Sponsored products stay:
+        # they're real products, shown in the list on Coles' own site too.
+        if not isinstance(raw, Mapping) or raw.get("_type") != "PRODUCT":
             continue
         pricing = raw.get("pricing") or {}
         price = pricing.get("now")
         if not raw.get("availability") or not isinstance(price, int | float) or price <= 0:
             continue
+        if raw.get("id") in seen:  # a sponsored copy of a product already listed
+            continue
+        seen.add(raw.get("id"))
         was = pricing.get("was")
         unit = pricing.get("unit") or {}
         brand, name, size = raw.get("brand") or "", raw.get("name") or "", raw.get("size") or ""
@@ -68,11 +73,21 @@ def parse_results(results: list[Any]) -> list[StoreProduct]:
                     f"{unit.get('ofMeasureQuantity') or 1}{unit.get('ofMeasureUnits') or ''}",
                     pricing.get("comparable"),
                 ),
+                deal=_deal(price, pricing),
                 image=f"{IMAGES}{images[0]['uri']}" if images and images[0].get("uri") else None,
                 url=f"{SITE}/product/{_slug(f'{brand} {name} {size}')}-{raw.get('id')}",
             )
         )
     return products
+
+
+def _deal(price: float, pricing: Mapping[str, Any]) -> Deal | None:
+    # "Pick any 2 for $13" comes as {"minQuantity": 2, "reward": 6.5}: the
+    # price of each when buying that many.
+    multibuy = pricing.get("multiBuyPromotion") or {}
+    quantity, each = multibuy.get("minQuantity"), multibuy.get("reward")
+    total = quantity * each if isinstance(quantity, int) and isinstance(each, int | float) else None
+    return deal(price, quantity, total, [pricing.get("offerDescription")])
 
 
 def _slug(text: str) -> str:

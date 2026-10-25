@@ -74,11 +74,19 @@ _MULTI = re.compile(r"(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(kg|g|ml|l)\b", re.IGNORECAS
 _SINGLE = re.compile(r"(\d+(?:\.\d+)?)\s*(kg|g|ml|l)\b", re.IGNORECASE)
 _COUNT = re.compile(r"(\d+)\s*(?:pack|pk|pieces|piece|ea|each|count|ct)\b", re.IGNORECASE)
 _SCALE = {"kg": 1000, "g": 1, "l": 1000, "ml": 1}
+# Loose fruit and veg are sold one at a time with a rough weight:
+# "Coles Bananas | approx 170g" is one banana.
+_APPROX = re.compile(r"\bapprox(?:\.|imately)?(?=\W|$)", re.IGNORECASE)
 
 
 def holds(product: StoreProduct) -> dict[str, float]:
     """What one of this product holds, by kind, read from its size."""
     size = product.size or ""
+    if _APPROX.search(size) or _APPROX.search(product.name):
+        single = _SINGLE.search(size) or _SINGLE.search(product.name)
+        if single:
+            return {COUNT: 1, MASS: float(single.group(1)) * _SCALE[single.group(2).lower()]}
+        return {COUNT: 1}
     amount: dict[str, float] = {}
     multi = _MULTI.search(size) or _MULTI.search(product.name)
     single = _SINGLE.search(size) or _SINGLE.search(product.name)
@@ -96,9 +104,34 @@ def holds(product: StoreProduct) -> dict[str, float]:
     return amount
 
 
-def packs_needed(needs: dict[str, float], product: StoreProduct) -> int:
+def each_grams(products: Sequence[StoreProduct]) -> float | None:
+    """The typical weight of one item, from those sold singly with a weight
+    ("approx 170g"), so a bag's count can be estimated. None if none are."""
+    weights = sorted(h[MASS] for h in map(holds, products) if h.get(COUNT) == 1 and h.get(MASS))
+    return weights[len(weights) // 2] if weights else None
+
+
+def estimate_count(has: dict[str, float], typical: float | None) -> dict[str, float]:
+    """Add a count to something sold by weight: a 1 kg bag of 170 g bananas holds about 6."""
+    if typical and MASS in has and COUNT not in has:
+        return {**has, COUNT: max(1, round(has[MASS] / typical))}
+    return has
+
+
+def cost_of(product: StoreProduct, packs: int) -> float:
+    """What that many cost, with the multi-buy deal for each full set of them."""
+    deal = product.deal
+    if deal and packs >= deal.quantity:
+        sets, rest = divmod(packs, deal.quantity)
+        return round(sets * deal.price + rest * product.price, 2)
+    return round(product.price * packs, 2)
+
+
+def packs_needed(
+    needs: dict[str, float], product: StoreProduct, has: dict[str, float] | None = None
+) -> int:
     """How many of the product cover what's needed (at least one, at most 24)."""
-    has = holds(product)
+    has = holds(product) if has is None else has
     packs = 1
     for kind, wanted in needs.items():
         if kind == PACK:
@@ -190,7 +223,9 @@ def good_match(ingredient: str, product_name: str) -> bool:
 # ---- Value for money ----------------------------------------------------------------
 
 
-def value_basis(needs: dict[str, float], products: Sequence[StoreProduct]) -> str:
+def value_basis(
+    needs: dict[str, float], products: Sequence[StoreProduct], typical: float | None = None
+) -> str:
     """Compare value per item or per kg/L.
 
     By what the recipes count in when they say; otherwise by how the products
@@ -201,26 +236,33 @@ def value_basis(needs: dict[str, float], products: Sequence[StoreProduct]) -> st
         return MASS
     if COUNT in needs:
         return COUNT
-    held = [holds(p) for p in products]
+    held = [estimate_count(holds(p), typical) for p in products]
     counted = sum(1 for h in held if h.get(COUNT, 0) > 1)
     weighed = sum(1 for h in held if MASS in h)
     return COUNT if counted and counted >= weighed else MASS
 
 
-def unit_value(product: StoreProduct, has: dict[str, float], basis: str) -> UnitPrice | None:
-    """The product's price per item or per kg/L, or None when its size can't be read."""
+def unit_value(
+    product: StoreProduct, has: dict[str, float], basis: str, price: float | None = None
+) -> UnitPrice | None:
+    """The product's price per item or per kg/L, or None when its size can't be read.
+
+    ``price`` is what one actually costs when it differs from the shelf price
+    (bought with a multi-buy deal).
+    """
+    price = product.price if price is None else price
     if basis == COUNT:
         count = has.get(COUNT)
         if not count:
             return None
-        each = product.price / count
+        each = price / count
         return UnitPrice(price=round(each, 4), per="each", text=f"${each:.2f} each")
-    if product.unit_price and product.unit_price.per in ("kg", "L"):
+    if product.unit_price and product.unit_price.per in ("kg", "L") and price == product.price:
         return product.unit_price
     grams = has.get(MASS)
     if not grams:
         return None
-    per_kg = product.price / grams * 1000
+    per_kg = price / grams * 1000
     return UnitPrice(price=round(per_kg, 4), per="kg", text=f"${per_kg:.2f} per kg")
 
 
@@ -238,33 +280,38 @@ def choose(
     usual: str | None = None,
     usual_packs: int | None = None,
     basis: str | None = None,
+    typical: float | None = None,
 ) -> list[Candidate]:
     """Rank a store's search results for one ingredient, best pick first.
 
     The pick is the product chosen last time when it turns up again. Otherwise,
     when there's an amount to buy, the cheapest real match that covers it;
     when there isn't, the real match that's the best value per item or kg.
-    Failing all that, the store's own top result.
+    Failing all that, the store's own top result. ``typical`` is the weight
+    of one item, for estimating how many are in a bag.
     """
     pool = list(products[:POOL])
     if not pool:
         return []
     matches = [good_match(ingredient, p.name) for p in pool]
-    basis = basis or value_basis(
-        needs, [p for p, ok in zip(pool, matches, strict=True) if ok] or pool
-    )
+    good_pool = [p for p, ok in zip(pool, matches, strict=True) if ok]
+    typical = typical or each_grams(good_pool)
+    basis = basis or value_basis(needs, good_pool or pool, typical)
     candidates = []
     for product, ok in zip(pool, matches, strict=True):
-        has = holds(product)
-        packs = packs_needed(needs, product)
+        read = holds(product)
+        has = estimate_count(read, typical) if ok else read
+        packs = packs_needed(needs, product, has)
+        cost = cost_of(product, packs)
         candidates.append(
             Candidate(
                 **product.model_dump(),
                 packs=packs,
-                cost=round(product.price * packs, 2),
+                cost=cost,
                 good_match=ok,
                 holds=has,
-                value=unit_value(product, has, basis),
+                estimated=has is not read,
+                value=unit_value(product, has, basis, round(cost / packs, 4)),
             )
         )
 
@@ -274,7 +321,7 @@ def choose(
         pick = usual_pick
         if not needs and usual_packs:  # bought by the pack, not for a recipe: same as last time
             pick.packs = usual_packs
-            pick.cost = round(pick.price * usual_packs, 2)
+            pick.cost = cost_of(pick, usual_packs)
     elif good and needs:
         pick = min(good, key=lambda c: (c.cost, _value(c)))
     elif good:
@@ -287,6 +334,8 @@ def choose(
             c.tags.append("usual")
         if c.on_special:
             c.tags.append("special")
+        if c.deal:
+            c.tags.append("deal")
     valued = [c for c in good if c.value]
     if len(valued) > 1:
         min(valued, key=_value).tags.append("best_value")
