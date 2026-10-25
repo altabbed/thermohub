@@ -4,7 +4,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    THERMOHUB_DATA_DIR=/data
+    THERMOHUB_DATA_DIR=/data \
+    THERMOHUB_CHROMIUM=/usr/bin/chromium
+
+# Chromium signs in to Woolworths and Coles and fills their carts (thermohub/browser.py).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends chromium fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .
@@ -13,7 +19,8 @@ RUN pip install -r requirements.txt
 COPY thermohub ./thermohub
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/
 
-# /data holds the Cookidoo login tokens. The entrypoint drops root and runs
+# /data holds the Cookidoo login tokens, the store browser profiles and the
+# remembered product choices. The entrypoint drops root and runs
 # the app as PUID:PGID (default 99:100, Unraid's nobody:users).
 VOLUME /data
 EXPOSE 8000

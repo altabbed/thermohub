@@ -4,10 +4,16 @@ import asyncio
 from collections.abc import Sequence
 import re
 
-from thermohub.models import CompareItem, Comparison, StoreId, StoreMatch, StoreTotal
+from thermohub.models import (
+    CompareItem,
+    CompareRequestItem,
+    Comparison,
+    StoreId,
+    StoreMatch,
+    StoreTotal,
+)
+from thermohub.smarts import Preferences, choose, item_key, need
 from thermohub.stores import Store, StoreError
-
-CANDIDATES = 5
 
 # Ingredients of user-created recipes are free text such as "350 g self-raising
 # flour"; the quantity and unit would only confuse a store search.
@@ -25,21 +31,37 @@ def search_term(name: str) -> str:
     return " ".join(term.split()) or name.strip()
 
 
-async def compare(names: Sequence[str], stores: Sequence[Store]) -> Comparison:
-    async def match(store: Store, term: str) -> StoreMatch:
+async def compare(
+    items: Sequence[CompareRequestItem],
+    stores: Sequence[Store],
+    preferences: Preferences | None = None,
+) -> Comparison:
+    async def match(store: Store, item: CompareRequestItem, key: str) -> StoreMatch:
+        term = search_term(item.name)
         try:
             products = await store.search(term)
         except StoreError as e:
             return StoreMatch(search_term=term, candidates=[], error=str(e))
-        return StoreMatch(search_term=term, candidates=products[:CANDIDATES])
+        usual = preferences.usual(store.id, key) if preferences else None
+        return StoreMatch(
+            search_term=term, candidates=choose(term, need(item.quantities), products, usual)
+        )
 
-    terms = [search_term(name) for name in names]
-    matches = await asyncio.gather(*(match(store, term) for term in terms for store in stores))
-    items = []
-    for i, name in enumerate(names):
+    keys = [item.key or item_key(item.name) for item in items]
+    matches = await asyncio.gather(
+        *(
+            match(store, item, key)
+            for item, key in zip(items, keys, strict=True)
+            for store in stores
+        )
+    )
+    compared = []
+    for i, item in enumerate(items):
         by_store = {store.id: matches[i * len(stores) + j] for j, store in enumerate(stores)}
-        items.append(CompareItem(name=name, matches=by_store, cheaper=_cheaper(by_store)))
-    return summarise(items, [store.id for store in stores])
+        compared.append(
+            CompareItem(name=item.name, key=keys[i], matches=by_store, cheaper=_cheaper(by_store))
+        )
+    return summarise(compared, [store.id for store in stores])
 
 
 def summarise(items: list[CompareItem], store_ids: list[StoreId]) -> Comparison:
@@ -49,14 +71,14 @@ def summarise(items: list[CompareItem], store_ids: list[StoreId]) -> Comparison:
     split_total = 0.0
     compared = 0
     for item in items:
-        picks = {s: m.candidates[0].price for s, m in item.matches.items() if m.candidates}
+        picks = {s: m.candidates[0].cost for s, m in item.matches.items() if m.candidates}
         for store_id in picks:
             found[store_id] += 1
         if len(picks) == len(store_ids):
             compared += 1
             split_total += min(picks.values())
-            for store_id, price in picks.items():
-                totals[store_id] += price
+            for store_id, cost in picks.items():
+                totals[store_id] += cost
 
     ranked = sorted(store_ids, key=lambda s: totals[s])
     cheapest = None
@@ -72,7 +94,7 @@ def summarise(items: list[CompareItem], store_ids: list[StoreId]) -> Comparison:
 
 
 def _cheaper(matches: dict[StoreId, StoreMatch]) -> StoreId | None:
-    picks = {s: m.candidates[0].price for s, m in matches.items() if m.candidates}
+    picks = {s: m.candidates[0].cost for s, m in matches.items() if m.candidates}
     if len(picks) < len(matches) or len(set(picks.values())) < len(picks):
         return None
     return min(picks, key=picks.__getitem__)

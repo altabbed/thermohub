@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Quantity(BaseModel):
@@ -80,19 +80,36 @@ class StoreProduct(BaseModel):
     url: str
 
 
+Tag = Literal["usual", "best_value", "special"]
+
+
+class Candidate(StoreProduct):
+    """A product that could be bought for an ingredient, priced for the amount needed."""
+
+    packs: int = Field(default=1, description="How many to buy to cover the recipes.")
+    cost: float = Field(description="Price for that many.")
+    good_match: bool = Field(
+        description="Has every word of the ingredient and isn't a different product."
+    )
+    tags: list[Tag] = Field(
+        default_factory=list,
+        description="usual: picked last time; best_value: lowest price per kg/L/each among "
+        "real matches; special: on special.",
+    )
+
+
 class StoreMatch(BaseModel):
     search_term: str
-    candidates: list[StoreProduct] = Field(
-        description="Available products in the store's relevance order; the first is the pick."
-    )
+    candidates: list[Candidate] = Field(description="The recommended pick first.")
     error: str | None = Field(default=None, description="Why the search failed, if it did.")
 
 
 class CompareItem(BaseModel):
     name: str
+    key: str = Field(description="Stable key for the ingredient, used to remember choices.")
     matches: dict[StoreId, StoreMatch]
     cheaper: StoreId | None = Field(
-        description="Store whose first candidate is cheaper; null on a tie or if either is missing."
+        description="Store whose pick costs less; null on a tie or if either is missing."
     )
 
 
@@ -110,8 +127,33 @@ class Comparison(BaseModel):
     cheapest: StoreId | None
 
 
+class CompareRequestItem(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    key: str | None = Field(default=None, description="Defaults to one made from the name.")
+    quantities: list[Quantity] = Field(
+        default_factory=list, description="What the recipes need, to work out pack counts."
+    )
+
+
 class CompareRequest(BaseModel):
-    items: list[str] = Field(min_length=1, max_length=60)
+    items: list[CompareRequestItem] = Field(min_length=1, max_length=60)
+
+    @field_validator("items", mode="before")
+    @classmethod
+    def _names_are_items(cls, items: object) -> object:
+        # A plain list of names is accepted too.
+        if isinstance(items, list):
+            return [{"name": i} if isinstance(i, str) else i for i in items]
+        return items
+
+
+class ChoiceRequest(BaseModel):
+    """Remember a product as the one to buy for an ingredient at a store."""
+
+    store: StoreId
+    key: str = Field(min_length=1, max_length=300)
+    product_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(max_length=300)
 
 
 ConnectionState = Literal["connected", "not_set_up", "needs_attention", "unavailable"]
@@ -130,6 +172,9 @@ class Connection(BaseModel):
     summary: str = Field(description="One plain-language sentence about the state.")
     detail: str | None = Field(default=None, description="Technical reason, when there is one.")
     note: str | None = Field(default=None, description="Anything else worth knowing.")
+    signed_in: bool | None = Field(
+        default=None, description="Stores: whether Thermohub is signed in to the account."
+    )
 
 
 class Status(BaseModel):
@@ -157,3 +202,57 @@ class SignInRequest(BaseModel):
     password: str = Field(min_length=1, max_length=1024)
     country: str = Field(min_length=2, max_length=8)
     language: str = Field(min_length=2, max_length=16)
+
+
+class CartLineRequest(BaseModel):
+    product_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=300)
+    url: str = Field(min_length=8, max_length=2000, description="The product's page at the store.")
+    quantity: int = Field(default=1, ge=1, le=24)
+    key: str | None = Field(default=None, description="Ingredient key, to remember the product.")
+
+
+class CartOrderRequest(BaseModel):
+    store: StoreId
+    lines: list[CartLineRequest] = Field(min_length=1, max_length=60)
+
+
+class CartRequest(BaseModel):
+    orders: list[CartOrderRequest] = Field(min_length=1, max_length=2)
+
+
+class StoreAccount(BaseModel):
+    """Whether Thermohub's browser is signed in to a store, so it can fill the cart."""
+
+    id: StoreId
+    name: str
+    signed_in: bool
+    cart_url: str
+
+
+class CartLineView(BaseModel):
+    product_id: str
+    name: str
+    url: str
+    quantity: int
+    key: str | None = None
+    status: Literal["waiting", "adding", "added", "failed", "skipped"]
+    message: str | None = None
+    screenshot: str | None = Field(
+        default=None, description="data: URL of what the page looked like when adding failed."
+    )
+
+
+class CartOrderView(BaseModel):
+    store: StoreId
+    name: str
+    state: Literal["waiting", "running", "done", "needs_sign_in", "failed"]
+    cart_url: str
+    message: str | None = None
+    lines: list[CartLineView]
+
+
+class CartJobView(BaseModel):
+    id: str
+    finished: bool
+    orders: list[CartOrderView]

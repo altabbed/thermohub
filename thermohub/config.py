@@ -21,6 +21,8 @@ class Settings(BaseSettings):
 
     # Where the Cookidoo sign-in is kept between restarts.
     data_dir: Path = Field(default=Path("/data"), validation_alias="THERMOHUB_DATA_DIR")
+    # Chromium for signing in to the stores and filling carts; Playwright's own when unset.
+    chromium: str | None = Field(default=None, validation_alias="THERMOHUB_CHROMIUM")
     # When set, every /api request must send it in the X-API-Key header.
     api_key: SecretStr | None = Field(default=None, validation_alias="THERMOHUB_API_KEY")
 
@@ -37,6 +39,10 @@ class Settings(BaseSettings):
     @property
     def account_file(self) -> Path:
         return self.data_dir / "cookidoo_account.json"
+
+    @property
+    def preferences_file(self) -> Path:
+        return self.data_dir / "preferences.json"
 
 
 @lru_cache

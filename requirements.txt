@@ -4,5 +4,9 @@ cookidoo-api==0.18.4
 # Browser-like HTTP client for the Woolworths and Coles sites (see thermohub/stores).
 curl_cffi==0.16.3
 fastapi==0.143.0
+# Drives Chromium to sign in to the stores and fill their carts (see thermohub/browser.py).
+playwright==1.63.0
 pydantic-settings==2.15.0
 uvicorn==0.54.0
+# uvicorn's WebSocket support: the live store sign-in streams over a WebSocket.
+websockets==17.3

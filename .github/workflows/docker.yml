@@ -17,6 +17,8 @@ jobs:
           python-version: "3.13"
       - run: pip install -r requirements-dev.txt
       - run: ruff check . && ruff format --check .
+      # tests/test_browser.py drives a real Chromium.
+      - run: python -m playwright install --with-deps chromium
       - run: pytest
 
   publish:
@@ -43,11 +45,43 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=semver,pattern={{version}}
             type=sha
-      - uses: docker/build-push-action@v6
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: thermohub:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Check the image before publishing it
+        run: |
+          # Chromium starts as the unprivileged user...
+          docker run --rm thermohub:ci python -m thermohub.browser
+          # ...and the server answers, including the live sign-in WebSocket.
+          docker run -d --name smoke -p 8000:8000 thermohub:ci
+          trap 'docker logs smoke; docker rm -f smoke' EXIT
+          for i in $(seq 1 30); do curl -sf localhost:8000/health && break; sleep 1; done
+          curl -sf localhost:8000/api/stores
+          docker exec -i smoke python - <<'EOF'
+          import asyncio, json, websockets
+
+          async def main():
+              url = "ws://127.0.0.1:8000/api/stores/woolworths/sign-in"
+              async with websockets.connect(url, max_size=None) as ws:
+                  await ws.send(json.dumps({"type": "hello", "width": 400, "height": 700}))
+                  message = await asyncio.wait_for(ws.recv(), 90)
+                  if isinstance(message, str) and json.loads(message)["type"] == "error":
+                      raise SystemExit(f"Sign-in failed: {message}")
+                  print("Live sign-in works:", "page frame" if isinstance(message, bytes) else message)
+                  await ws.send(json.dumps({"type": "cancel"}))
+
+          asyncio.run(main())
+          EOF
+      - name: Publish
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max

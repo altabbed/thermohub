@@ -8,6 +8,10 @@ if [ "$(id -u)" = "0" ]; then
     PGID="${PGID:-100}"
     mkdir -p "$THERMOHUB_DATA_DIR"
     chown -R "$PUID:$PGID" "$THERMOHUB_DATA_DIR"
+    # Chromium needs a writable home for its caches; root's isn't.
+    export HOME=/tmp/thermohub
+    mkdir -p "$HOME"
+    chown "$PUID:$PGID" "$HOME"
     exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups "$@"
 fi
 

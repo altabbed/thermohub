@@ -8,12 +8,12 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/altabbed/thermohub/issues</Support>
   <Project>https://github.com/altabbed/thermohub</Project>
-  <Overview>Connects to Cookidoo and shows your Thermomix shopping list, and compares Woolworths and Coles prices for it. After installing, open the WebUI and connect your Cookidoo account from there; no settings needed here.</Overview>
+  <Overview>Connects to Cookidoo and shows your Thermomix shopping list, compares Woolworths and Coles prices for it, and sends the items to your Woolworths or Coles cart. After installing, open the WebUI and connect your accounts from there; no settings needed here.</Overview>
   <Category>Tools:</Category>
   <WebUI>http://[IP]:[PORT:8000]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/altabbed/thermohub/main/unraid/thermohub.xml</TemplateURL>
   <Config Name="WebUI / API port" Target="8000" Default="8000" Mode="tcp" Description="Port the web page and API are served on. Change the host side if 8000 is taken." Type="Port" Display="always" Required="true" Mask="false">8000</Config>
-  <Config Name="Appdata" Target="/data" Default="/mnt/user/appdata/thermohub" Mode="rw" Description="Keeps the Cookidoo sign-in so restarts don't need a fresh one. Your password is never stored." Type="Path" Display="advanced" Required="true" Mask="false">/mnt/user/appdata/thermohub</Config>
+  <Config Name="Appdata" Target="/data" Default="/mnt/user/appdata/thermohub" Mode="rw" Description="Keeps the Cookidoo sign-in, the Woolworths and Coles sign-ins and the products you chose, so restarts don't need a fresh sign-in. Passwords are never stored." Type="Path" Display="advanced" Required="true" Mask="false">/mnt/user/appdata/thermohub</Config>
   <Config Name="Access key" Target="THERMOHUB_API_KEY" Default="" Mode="" Description="Optional. When set, the Thermohub page asks for this key once per browser." Type="Variable" Display="always" Required="false" Mask="true"/>
   <Config Name="Cookidoo email (optional)" Target="COOKIDOO_EMAIL" Default="" Mode="" Description="Leave blank and connect Cookidoo from the Thermohub page instead. If set, Thermohub signs in with it automatically." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Cookidoo password (optional)" Target="COOKIDOO_PASSWORD" Default="" Mode="" Description="Only used with the email above." Type="Variable" Display="advanced" Required="false" Mask="true"/>

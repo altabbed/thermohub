@@ -1,13 +1,29 @@
+import asyncio
+from pathlib import Path
+import tempfile
+
 from cookidoo_api import CookidooAuthException, CookidooLocalizationConfig, CookidooRequestException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 import pytest
+import uvicorn
 
 from tests.pantry_fixture import PANTRY
 from tests.test_compare import FakeStore, product
+from thermohub import main
+from thermohub.browser import SITES
 from thermohub.config import Settings, get_settings
 from thermohub.cookidoo_client import Account, NotSignedIn, UnknownRegion
-from thermohub.main import app, get_cookidoo, get_stores
+from thermohub.main import (
+    app,
+    get_browsers,
+    get_cart_jobs,
+    get_cookidoo,
+    get_preferences,
+    get_sites,
+    get_stores,
+)
+from thermohub.smarts import Preferences
 
 GOOD_PASSWORD = "right-password"
 
@@ -45,6 +61,21 @@ class FakeCookidoo:
         self.account = Account(country="au", language="en-AU", signed_out=True)
 
 
+class FakeBrowsers:
+    def __init__(self, signed_in=()):
+        self.signed = set(signed_in)
+        self.locks = {}
+
+    def lock(self, store_id):
+        return self.locks.setdefault(store_id, asyncio.Lock())
+
+    def signed_in(self, store_id):
+        return store_id in self.signed
+
+    async def sign_out(self, store_id):
+        self.signed.discard(store_id)
+
+
 def fake_stores():
     return [
         FakeStore("woolworths", {"milk": [product("woolworths", "w-milk", 3.10)]}),
@@ -52,10 +83,24 @@ def fake_stores():
     ]
 
 
-def make_client(cookidoo=None, api_key: str | None = None, stores=None) -> TestClient:
+def make_client(
+    cookidoo=None,
+    api_key: str | None = None,
+    stores=None,
+    preferences=None,
+    browsers=None,
+    jobs=None,
+):
     settings = Settings(_env_file=None, THERMOHUB_API_KEY=api_key)
     cookidoo = cookidoo or FakeCookidoo()
     stores = stores or fake_stores()
+    preferences = preferences or Preferences(Path(tempfile.mkdtemp()) / "preferences.json")
+    browsers = browsers or FakeBrowsers()
+    jobs = {} if jobs is None else jobs
+    app.dependency_overrides[get_browsers] = lambda: browsers
+    app.dependency_overrides[get_sites] = lambda: SITES
+    app.dependency_overrides[get_cart_jobs] = lambda: jobs
+    app.dependency_overrides[get_preferences] = lambda: preferences
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_cookidoo] = lambda: cookidoo
     app.dependency_overrides[get_stores] = lambda: stores
@@ -130,7 +175,17 @@ def test_status_all_connected():
     assert found["cookidoo"]["summary"] == "Connected as me@example.com"
     assert found["woolworths"]["state"] == "connected"
     assert found["woolworths"]["summary"] == "Prices available"
-    assert "don't need to sign in" in found["coles"]["note"]
+    assert found["woolworths"]["signed_in"] is False
+    assert found["woolworths"]["note"] == "Sign in to send items to your Woolworths cart."
+
+
+def test_status_signed_in_to_a_store():
+    found = connections(make_client(browsers=FakeBrowsers(signed_in=["coles"])))
+
+    assert found["coles"]["signed_in"] is True
+    assert found["coles"]["note"] is None
+    assert found["woolworths"]["signed_in"] is False
+    assert found["cookidoo"]["signed_in"] is None
 
 
 def test_status_nothing_set_up():
@@ -234,8 +289,282 @@ def test_compare():
     assert body["items"][0]["matches"]["woolworths"]["candidates"][0]["price"] == 3.10
 
 
+def test_compare_with_quantities_and_remembered_choice(tmp_path):
+    preferences = Preferences(tmp_path / "preferences.json")
+    client = make_client(preferences=preferences)
+    item = {"name": "milk", "key": "ref:milk", "quantities": [{"amount": 3, "unit": ""}]}
+
+    assert (
+        client.post(
+            "/api/choices",
+            json={"store": "coles", "key": "ref:milk", "product_id": "c-milk", "name": "Milk"},
+        ).status_code
+        == 204
+    )
+    body = client.post("/api/compare", json={"items": [item]}).json()
+
+    coles = body["items"][0]["matches"]["coles"]["candidates"][0]
+    assert coles["tags"] == ["usual"]
+    assert preferences.usual("coles", "ref:milk") == "c-milk"
+
+
 def test_compare_needs_items():
     assert make_client().post("/api/compare", json={"items": []}).status_code == 422
+
+
+def test_store_accounts():
+    accounts = make_client(browsers=FakeBrowsers(signed_in=["coles"])).get("/api/stores").json()
+
+    assert accounts == [
+        {
+            "id": "woolworths",
+            "name": "Woolworths",
+            "signed_in": False,
+            "cart_url": "https://www.woolworths.com.au/shop/cart",
+        },
+        {
+            "id": "coles",
+            "name": "Coles",
+            "signed_in": True,
+            "cart_url": "https://www.coles.com.au/trolley",
+        },
+    ]
+
+
+def test_store_sign_out():
+    browsers = FakeBrowsers(signed_in=["coles"])
+    client = make_client(browsers=browsers)
+
+    assert client.post("/api/stores/coles/sign-out").status_code == 204
+    assert browsers.signed == set()
+    assert client.post("/api/stores/aldi/sign-out").status_code == 404
+
+
+WOOLWORTHS_MILK = "https://www.woolworths.com.au/shop/productdetails/1/milk"
+
+
+def cart_request(url=WOOLWORTHS_MILK, key="ref:milk"):
+    line = {"product_id": "w-milk", "name": "Milk 2L", "url": url, "quantity": 2, "key": key}
+    return {"orders": [{"store": "woolworths", "lines": [line]}]}
+
+
+@pytest.fixture
+def fake_fill(monkeypatch):
+    calls = []
+
+    async def fill_carts(job, browsers, sites, on_added):
+        calls.append(job)
+        for order in job.orders:
+            order.cart_url = sites[order.store].cart_url
+            for line in order.lines:
+                line.status = "added"
+                on_added(order, line)
+            order.state = "done"
+
+    monkeypatch.setattr(main, "fill_carts", fill_carts)
+    return calls
+
+
+def test_send_to_carts(fake_fill, tmp_path):
+    preferences = Preferences(tmp_path / "preferences.json")
+    client = make_client(preferences=preferences, browsers=FakeBrowsers(["woolworths"]))
+
+    started = client.post("/api/carts", json=cart_request())
+
+    assert started.status_code == 202
+    body = started.json()
+    assert body["orders"][0]["name"] == "Woolworths"
+    assert body["orders"][0]["lines"] == [
+        {
+            "product_id": "w-milk",
+            "name": "Milk 2L",
+            "url": WOOLWORTHS_MILK,
+            "quantity": 2,
+            "key": "ref:milk",
+            "status": "waiting",
+            "message": None,
+            "screenshot": None,
+        }
+    ]
+    [job] = fake_fill
+    assert job.orders[0].lines[0].quantity == 2
+
+    progress = client.get(f"/api/carts/{body['id']}").json()
+    assert progress["finished"] is True
+    assert progress["orders"][0]["state"] == "done"
+    assert progress["orders"][0]["cart_url"] == "https://www.woolworths.com.au/shop/cart"
+    assert progress["orders"][0]["lines"][0]["status"] == "added"
+    # What went into the cart becomes the usual pick.
+    assert preferences.usual("woolworths", "ref:milk") == "w-milk"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://evil.example/milk",
+        "javascript://www.woolworths.com.au/%0Aalert(1)",
+        "http://www.woolworths.com.au/shop/productdetails/1/milk",
+    ],
+)
+def test_send_to_carts_only_opens_the_store_own_pages(fake_fill, url):
+    client = make_client()
+
+    response = client.post("/api/carts", json=cart_request(url=url))
+
+    assert response.status_code == 400
+    assert "woolworths.com.au" in response.json()["detail"]
+    assert fake_fill == []
+
+
+def test_cart_job_failure_shows_screenshot():
+    from thermohub.browser import CartJob, CartLine, CartOrder
+
+    line = CartLine("c1", "Saffron", "https://www.coles.com.au/product/c1", status="failed")
+    line.screenshot = b"\xff\xd8jpeg"
+    order = CartOrder(store="coles", lines=[line], state="done")
+    client = make_client(jobs={"j1": CartJob(id="j1", orders=[order])})
+
+    body = client.get("/api/carts/j1").json()
+
+    assert body["orders"][0]["lines"][0]["screenshot"] == "data:image/jpeg;base64,/9hqcGVn"
+    assert client.get("/api/carts/nope").status_code == 404
+
+
+def test_old_cart_jobs_are_cleared(fake_fill):
+    jobs = {}
+    client = make_client(jobs=jobs)
+
+    ids = [client.post("/api/carts", json=cart_request()).json()["id"] for _ in range(22)]
+
+    assert len(jobs) == 20
+    assert ids[0] not in jobs and ids[-1] in jobs
+
+
+class FakeLiveSignIn:
+    instances = []
+
+    def __init__(self, browsers, site, send):
+        self.site = site
+        self.send = send
+        self.actions = []
+        self.closed = False
+        FakeLiveSignIn.instances.append(self)
+
+    async def start(self, width, height, scale):
+        self.actions.append(("start", width, height, scale))
+        await self.send(b"\xff\xd8frame")
+
+    async def tap(self, x, y):
+        self.actions.append(("tap", x, y))
+        await self.send({"type": "editable", "value": True})
+
+    async def type_text(self, text):
+        self.actions.append(("text", text))
+
+    async def press(self, key):
+        self.actions.append(("key", key))
+
+    async def finish(self):
+        self.actions.append(("finish",))
+        return True
+
+    async def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def live(monkeypatch):
+    FakeLiveSignIn.instances = []
+    monkeypatch.setattr(main, "LiveSignIn", FakeLiveSignIn)
+    return FakeLiveSignIn.instances
+
+
+def test_store_sign_in_websocket(live):
+    client = make_client(api_key="s3cret")
+
+    with client.websocket_connect("/api/stores/coles/sign-in") as ws:
+        ws.send_json({"type": "hello", "width": 400, "height": 800, "scale": 2, "key": "s3cret"})
+        assert ws.receive_bytes() == b"\xff\xd8frame"
+        ws.send_json({"type": "tap", "x": 10, "y": 20})
+        assert ws.receive_json() == {"type": "editable", "value": True}
+        ws.send_json({"type": "tap"})  # malformed: ignored
+        ws.send_json({"type": "text", "text": "me@example.com"})
+        ws.send_json({"type": "key", "key": "Enter"})
+        ws.send_json({"type": "done"})
+        assert ws.receive_json() == {"type": "result", "signed_in": True}
+
+    [session] = live
+    assert session.site.id == "coles"
+    assert session.actions == [
+        ("start", 400, 800, 2),
+        ("tap", 10.0, 20.0),
+        ("text", "me@example.com"),
+        ("key", "Enter"),
+        ("finish",),
+    ]
+    assert session.closed
+
+
+@pytest.mark.parametrize(
+    ("path", "key", "message"),
+    [
+        ("/api/stores/coles/sign-in", "wrong", "access key"),
+        ("/api/stores/aldi/sign-in", "s3cret", "doesn't know that store"),
+    ],
+)
+def test_store_sign_in_websocket_refusals(live, path, key, message):
+    client = make_client(api_key="s3cret")
+
+    with client.websocket_connect(path) as ws:
+        ws.send_json({"type": "hello", "key": key})
+        reply = ws.receive_json()
+
+    assert reply["type"] == "error"
+    assert message in reply["message"]
+    assert live == []
+
+
+def test_store_sign_in_websocket_refuses_other_websites(live):
+    from starlette.websockets import WebSocketDisconnect
+
+    client = make_client()
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            "/api/stores/coles/sign-in", headers={"origin": "https://evil.example"}
+        ) as ws:
+            ws.send_json({"type": "hello"})
+    with client.websocket_connect(
+        "/api/stores/coles/sign-in", headers={"origin": "http://testserver"}
+    ) as ws:
+        ws.send_json({"type": "hello"})
+        assert ws.receive_bytes() == b"\xff\xd8frame"
+        ws.send_json({"type": "cancel"})
+    assert len(live) == 1
+
+
+def test_store_sign_in_websocket_while_busy(live):
+    browsers = FakeBrowsers()
+    client = make_client(browsers=browsers)
+
+    async def hold():
+        await browsers.lock("woolworths").acquire()
+
+    asyncio.run(hold())
+    with client.websocket_connect("/api/stores/woolworths/sign-in") as ws:
+        ws.send_json({"type": "hello"})
+        reply = ws.receive_json()
+
+    assert "busy" in reply["message"]
+    assert live == []
+
+
+def test_uvicorn_can_serve_the_sign_in_websocket():
+    # TestClient doesn't go through uvicorn, which needs a WebSocket library installed.
+    config = uvicorn.Config(app, ws="auto")
+    config.load()
+
+    assert config.ws_protocol_class is not None
 
 
 def test_api_key_required_when_configured():

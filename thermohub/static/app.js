@@ -19,6 +19,12 @@ const ICONS = {
   check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
   tag: '<path d="M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z"/><circle cx="7.5" cy="7.5" r="1.3"/>',
   bulb: '<path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/>',
+  lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+  star: '<path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/>',
+  warn: '<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17.5v.01"/>',
+  minus: '<path d="M7 12h10"/>',
+  circle: '<circle cx="12" cy="12" r="7"/>',
+  open: '<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
 };
 
 function icon(name) {
@@ -114,11 +120,22 @@ const data = {
   comparison: null,
   comparing: null,
   compareError: null,
-  picks: [],
+  compared: [], // the shopping list items behind each comparison row
+  picks: [], // per item, per shop: which candidate is chosen
+  plan: null, // "woolworths", "coles" or "split"
+  storeFor: [], // per item: a shop chosen by hand, overriding the plan
   open: new Set(),
   account: null,
   regions: null,
+  accounts: null, // shop sign-ins
+  returnTo: "accounts", // where the shop sign-in screen goes afterwards
+  cartRequest: null,
+  cartJob: null,
+  cartError: null,
 };
+
+// Called when leaving a screen that holds something open (the live sign-in).
+let leaveScreen = null;
 
 function loadStatus(force = false) {
   if (!force && data.status && Date.now() - data.statusAt < 60_000) return Promise.resolve(data.status);
@@ -150,6 +167,15 @@ async function loadAccount() {
   return account;
 }
 
+function loadAccounts(force = false) {
+  if (!force && data.accounts) return Promise.resolve(data.accounts);
+  return api("stores").then((accounts) => (data.accounts = accounts));
+}
+
+const signedIn = (storeId) => Boolean(data.accounts && data.accounts.some((a) => a.id === storeId && a.signed_in));
+const storeById = (id) => STORES.find((s) => s.id === id);
+const storeDot = (id) => el("span", { class: "store-dot", style: `--brand: var(--${id})` });
+
 function failed(err) {
   if (err instanceof NeedsKey) showKeyScreen();
   else console.error(err);
@@ -157,31 +183,38 @@ function failed(err) {
 
 // ---- Screens ------------------------------------------------------------------
 
-const SCREENS = { list: showList, compare: showCompare, accounts: showSettings };
+const SCREENS = { list: showList, compare: showCompare, accounts: showSettings, signin: showSignIn, cart: showCart };
 
-function screenName() {
-  const name = location.hash.slice(1);
-  return SCREENS[name] ? name : "list";
+// "#signin/coles" is the sign-in screen for Coles.
+function route() {
+  const [name, arg] = location.hash.slice(1).split("/");
+  return SCREENS[name] ? { name, arg } : { name: "list" };
 }
 
-function go(name) {
-  if (screenName() === name) render();
-  else location.hash = name;
+const screenName = () => route().name;
+
+function go(hash) {
+  if (location.hash.slice(1) === hash) render();
+  else location.hash = hash;
 }
 
 function render() {
+  if (leaveScreen) leaveScreen();
+  leaveScreen = null;
   hideAction();
   fill(app());
   window.scrollTo(0, 0);
-  SCREENS[screenName()](app());
+  const { name, arg } = route();
+  SCREENS[name](app(), arg);
 }
 
 const app = () => document.getElementById("app");
 
 function header(back = false) {
   if (back) {
+    const to = back === true ? { href: "#list", label: "Shopping list" } : back;
     return el("header", { class: "header" },
-      el("a", { class: "icon-button back", href: "#list" }, icon("back"), "Shopping list"));
+      el("a", { class: "icon-button back", href: to.href }, icon("back"), to.label));
   }
   return el("header", { class: "header" },
     el("a", { class: "brand", href: "#list" }, el("span", { class: "brand-mark" }, icon("cart")), "Thermohub"),
@@ -382,22 +415,41 @@ function connectForm(onConnected) {
 // -- Price comparison --
 
 function startComparison() {
-  const names = data.list.items.map((i) => i.name).filter((n) => data.selected.has(n));
+  const items = data.list.items.filter((i) => data.selected.has(i.name));
   data.comparison = null;
   data.compareError = null;
   data.open = new Set();
-  data.comparing = api("compare", { method: "POST", body: JSON.stringify({ items: names }) })
+  data.comparing = api("compare", {
+    method: "POST",
+    body: JSON.stringify({
+      items: items.map((i) => ({
+        name: i.name,
+        key: i.ingredient_ref ? `ref:${i.ingredient_ref}` : null,
+        quantities: i.quantities,
+      })),
+    }),
+  })
     .then((comparison) => {
       data.comparison = comparison;
+      data.compared = items;
       data.picks = comparison.items.map(() => ({}));
+      data.storeFor = comparison.items.map(() => null);
+      data.plan = defaultPlan(comparison);
     })
     .catch((err) => (data.compareError = err))
     .finally(() => {
       data.comparing = null;
       if (screenName() === "compare") render();
     });
-  data.comparingCount = names.length;
+  data.comparingCount = items.length;
   go("compare");
+}
+
+// Start with the cheaper shop; if neither is cheaper, the one that has more of the items.
+function defaultPlan(comparison) {
+  if (comparison.cheapest) return comparison.cheapest;
+  const most = [...comparison.totals].sort((a, b) => b.found - a.found)[0];
+  return most ? most.store : STORES[0].id;
 }
 
 function showCompare(root) {
@@ -420,6 +472,8 @@ function showCompare(root) {
   }
   if (!data.comparison) return go("list");
   drawComparison(body);
+  // The send button needs to know which shops Thermohub is signed in to.
+  loadAccounts().then(() => body.isConnected && sendAction()).catch(failed);
 }
 
 function pick(i, storeId) {
@@ -429,25 +483,67 @@ function pick(i, storeId) {
 
 function cheaperAt(i) {
   const [a, b] = STORES.map((s) => pick(i, s.id));
-  if (!a || !b || Math.abs(a.price - b.price) < 0.005) return null;
-  return a.price < b.price ? STORES[0].id : STORES[1].id;
+  if (!a || !b || Math.abs(a.cost - b.cost) < 0.005) return null;
+  return a.cost < b.cost ? STORES[0].id : STORES[1].id;
 }
 
+// Where an item is bought under a plan: everything at one shop (leaving out
+// what it doesn't have), or each item wherever it's cheaper.
+function planStore(i, plan) {
+  if (plan !== "split") return pick(i, plan) ? plan : null;
+  return cheaperAt(i) || STORES.map((s) => s.id).find((s) => pick(i, s)) || null;
+}
+
+function storeFor(i) {
+  const chosen = data.storeFor[i];
+  return chosen && pick(i, chosen) ? chosen : planStore(i, data.plan);
+}
+
+const changedByHand = () => data.storeFor.filter((s, i) => s && s !== planStore(i, data.plan)).length;
+
+function planTotal(plan) {
+  let total = 0;
+  let count = 0;
+  const shops = new Set();
+  data.comparison.items.forEach((_, i) => {
+    const s = planStore(i, plan);
+    if (!s) return;
+    total += pick(i, s).cost;
+    count++;
+    shops.add(s);
+  });
+  return { total, count, shops };
+}
+
+// What will actually be bought, by shop.
+function basket() {
+  const orders = Object.fromEntries(STORES.map((s) => [s.id, []]));
+  let total = 0;
+  data.comparison.items.forEach((item, i) => {
+    const s = storeFor(i);
+    if (!s) return;
+    const p = pick(i, s);
+    orders[s].push({ item, p });
+    total += p.cost;
+  });
+  const shops = STORES.filter((s) => orders[s.id].length);
+  return { orders, total, shops, count: shops.reduce((n, s) => n + orders[s.id].length, 0) };
+}
+
+// Like-for-like totals: only the items both shops have.
 function summarise() {
   const totals = Object.fromEntries(STORES.map((s) => [s.id, 0]));
   const found = Object.fromEntries(STORES.map((s) => [s.id, 0]));
-  let split = 0;
   let compared = 0;
   data.comparison.items.forEach((_, i) => {
     const picks = STORES.map((s) => pick(i, s.id));
     STORES.forEach((s, j) => picks[j] && found[s.id]++);
     if (picks.every(Boolean)) {
       compared++;
-      split += Math.min(...picks.map((p) => p.price));
-      STORES.forEach((s, j) => (totals[s.id] += picks[j].price));
+      STORES.forEach((s, j) => (totals[s.id] += picks[j].cost));
     }
   });
-  return { totals, found, split, compared };
+  return { totals, found, compared };
 }
 
 function drawComparison(body) {
@@ -458,6 +554,7 @@ function drawComparison(body) {
   const diff = Math.abs(sum.totals[a.id] - sum.totals[b.id]);
   const winner = sum.compared && diff >= 0.005 ? (sum.totals[a.id] < sum.totals[b.id] ? a : b) : null;
   const unavailable = STORES.filter((s) => c.items.some((item) => item.matches[s.id] && item.matches[s.id].error));
+  const redraw = () => drawComparison(body);
 
   let answer;
   if (!sum.compared && unavailable.length) {
@@ -468,7 +565,7 @@ function drawComparison(body) {
       el("p", {}, others.length
         ? `Here are the ${listOf(others.map((s) => s.name))} prices. Try again in a few minutes to compare.`
         : "Try again in a few minutes."),
-      el("div", {}, el("button", { class: "button primary small", type: "button", onclick: startComparison }, "Try again")));
+      el("div", {}, el("button", { class: "button secondary small", type: "button", onclick: startComparison }, "Try again")));
   } else if (!sum.compared) {
     answer = el("div", { class: "answer" }, el("h1", {}, "Nothing to compare"),
       el("p", {}, "Neither shop had a match for the same items."));
@@ -482,102 +579,576 @@ function drawComparison(body) {
       el("p", {}, sum.compared === count ? `For all ${plural(count, "item")}.` : `For the ${plural(sum.compared, "item")} both shops have.`));
   }
 
-  const totals = sum.compared ? el("div", { class: "totals" }, STORES.map((s) =>
-    el("div", { class: `card total${winner && winner.id === s.id ? " best" : ""}` },
-      el("span", { class: "store" }, el("span", { class: "store-dot", style: `--brand: var(--${s.id})` }), s.name),
-      el("span", { class: "amount" }, money.format(sum.totals[s.id])),
-      winner && winner.id === s.id
-        ? el("span", { class: "best-label" }, icon("check"), "Cheaper")
-        : el("span", { class: "of" }, sum.found[s.id] === count ? `All ${count} items` : `Has ${sum.found[s.id]} of ${count}`)))) : null;
-
-  const cheapest = Math.min(sum.totals[a.id], sum.totals[b.id]);
-  const tip = sum.compared && cheapest - sum.split >= 0.5
-    ? el("div", { class: "card tip" }, icon("bulb"),
-      el("p", {}, `Buying each item wherever it's cheapest would cost ${money.format(sum.split)}, another ${money.format(cheapest - sum.split)} less.`))
-    : null;
-
   const partly = sum.compared && unavailable.length
     ? el("div", { class: "card problem-banner" },
       el("strong", {}, `Some ${listOf(unavailable.map((s) => s.name))} prices are missing`),
       el("p", {}, "That shop didn't respond for every item, so the totals only count items both shops priced."))
     : null;
 
-  const rows = c.items.map((item, i) => itemRow(item, i));
-
+  const anything = STORES.some((s) => sum.found[s.id]);
   fill(body,
     answer,
-    totals,
     partly,
-    tip,
-    el("p", { class: "section-label" }, "Item by item"),
-    el("ul", { class: "card rows" }, rows),
-    el("p", { class: "note" }, "Prices are for one of each product, from each shop's website. Tap an item to see the product, or choose a different one."));
+    anything ? planPicker(redraw, winner) : null,
+    el("p", { class: "section-label" }, "Your items"),
+    el("ul", { class: "card rows" }, c.items.map((item, i) => itemRow(item, i, redraw))),
+    el("p", { class: "note" }, "Thermohub picks products that match each ingredient, in the amount your recipes need, and remembers the ones you choose."));
+  sendAction();
 }
 
-function itemRow(item, i) {
-  const li = el("li");
-  const draw = () => {
-    const open = data.open.has(i);
-    const cheaper = cheaperAt(i);
-    const button = el("button", { class: "item-row", type: "button", "aria-expanded": String(open) },
-      el("span", { class: "name" }, nice(item.name)),
-      el("span", { class: "chev" }, icon("chev")),
-      el("span", { class: "prices" }, STORES.map((s) => priceCell(item, i, s, cheaper === s.id))));
-    button.addEventListener("click", () => {
-      if (data.open.has(i)) data.open.delete(i);
-      else data.open.add(i);
-      draw();
+// -- Where to shop: one shop, or each item wherever it's cheaper --
+
+function planPicker(redraw, winner) {
+  const count = data.comparison.items.length;
+  const single = STORES.map((s) => ({ id: s.id, total: planTotal(s.id) }));
+  const split = planTotal("split");
+  const best = single.filter((o) => o.total.count === split.count).sort((x, y) => x.total.total - y.total.total)[0];
+  const splitSaves = best ? best.total.total - split.total : 0;
+  const options = single.map(({ id, total }) => {
+    const store = storeById(id);
+    return {
+      id,
+      label: [storeDot(id), store.name],
+      sub: total.count === count ? `All ${plural(count, "item")}` : `${total.count} of ${count} items`,
+      total,
+      badge: winner && winner.id === id ? "Cheaper" : null,
+    };
+  });
+  // Both shops is only worth offering when it's cheaper than either one alone.
+  if (split.shops.size > 1 && splitSaves >= 0.5) {
+    options.push({
+      id: "split",
+      label: [el("span", { class: "store-pair" }, STORES.map((s) => storeDot(s.id))), "Both shops"],
+      sub: `Each item where it's cheaper: ${money.format(splitSaves)} less than all at ${storeById(best.id).name}.`,
+      total: split,
+      badge: null,
     });
-    fill(li, button, open ? itemDetail(item, i, () => drawComparison(li.closest(".stack"))) : null);
-  };
-  draw();
-  return li;
-}
-
-function priceCell(item, i, store, cheaper) {
-  const match = item.matches[store.id];
-  const p = pick(i, store.id);
-  const dot = el("span", { class: "store-dot", style: `--brand: var(--${store.id})` });
-  if (!p) {
-    return el("span", { class: "price" }, dot, el("span", {}, store.name),
-      el("span", { class: "missing" }, match && match.error ? "No price" : "Not found"), el("span", { class: "slot" }));
+  } else if (data.plan === "split") {
+    data.plan = defaultPlan(data.comparison);
   }
-  return el("span", { class: `price${cheaper ? " cheaper" : ""}` }, dot,
-    el("span", {}, store.name),
-    el("span", { class: "value" }, money.format(p.price)),
-    el("span", { class: "slot", "aria-label": cheaper ? "cheaper" : null }, cheaper ? icon("check") : null));
-}
 
-function itemDetail(item, i, redraw) {
-  return el("div", { class: "item-detail" }, STORES.map((store) => {
-    const match = item.matches[store.id];
-    if (!match || !match.candidates.length) {
-      return el("div", { class: "product none" },
-        match && match.error ? `Couldn't check ${store.name} for this item.` : `${store.name} doesn't seem to sell this.`);
-    }
-    const p = pick(i, store.id);
-    const url = safeUrl(p.url);
-    const meta = [store.name, p.size, p.unit_price && p.unit_price.text].filter(Boolean).join(" · ");
-    let chooser = null;
-    if (match.candidates.length > 1) {
-      const current = data.picks[i][store.id] || 0;
-      chooser = el("select", { "aria-label": `Choose a different ${store.name} product` },
-        el("option", { value: "", selected: true, disabled: true }, "Choose a different product"),
-        match.candidates.map((cand, j) => el("option", { value: String(j) },
-          `${j === current ? "✓ " : ""}${cand.name}${cand.size && !cand.name.includes(cand.size) ? ` ${cand.size}` : ""} — ${money.format(cand.price)}`)));
-      chooser.addEventListener("change", () => {
-        data.picks[i][store.id] = Number(chooser.value);
+  const changed = changedByHand();
+  return el("fieldset", { class: "plans" },
+    el("legend", { class: "section-label" }, "Where do you want to shop?"),
+    el("div", { class: "card rows" }, options.map((o) => {
+      const id = `plan-${o.id}`;
+      const input = el("input", { type: "radio", class: "tick", name: "plan", id, value: o.id, checked: data.plan === o.id });
+      // On click rather than change: picking the current option again also undoes items moved by hand.
+      input.addEventListener("click", () => {
+        data.plan = o.id;
+        data.storeFor = data.storeFor.map(() => null);
         redraw();
       });
-    }
-    return el("div", { class: "product" },
+      return el("label", { class: `plan${data.plan === o.id ? " on" : ""}`, for: id },
+        input,
+        el("span", { class: "store plan-name" }, o.label),
+        el("span", { class: "plan-total" }, money.format(o.total.total)),
+        el("span", { class: "plan-sub" }, o.sub, o.badge ? el("span", { class: "best-label" }, icon("check"), o.badge) : null));
+    })),
+    changed
+      ? el("p", { class: "note plan-note" }, `You've moved ${plural(changed, "item")} to the other shop. `,
+        el("button", { class: "text-button", type: "button", onclick: () => {
+          data.storeFor = data.storeFor.map(() => null);
+          redraw();
+        } }, "Undo"))
+      : null);
+}
+
+// -- One item: the product it'll be, and which shop --
+
+const TAGS = {
+  usual: { label: "You usually buy this", icon: "star", class: "usual" },
+  best_value: { label: "Best value", icon: "tag", class: "value" },
+  special: { label: "On special", icon: "tag", class: "special" },
+};
+
+function tags(p, withCheck = false) {
+  const list = p.tags.map((t) => TAGS[t]).filter(Boolean)
+    .map((t) => el("span", { class: `tag ${t.class}` }, icon(t.icon), t.label));
+  if (withCheck && !p.good_match) list.push(el("span", { class: "tag check" }, icon("warn"), "Check this is right"));
+  return list.length ? el("span", { class: "tags" }, list) : null;
+}
+
+const howMany = (p) => (p.packs > 1 ? `${p.packs} × ${money.format(p.price)}` : money.format(p.price));
+
+function productMeta(p) {
+  const size = p.size && p.size.toLowerCase() !== "each" && !p.name.includes(p.size) ? p.size : null;
+  return [size, p.unit_price && p.unit_price.text].filter(Boolean).join(" · ");
+}
+
+function itemRow(item, i, redraw) {
+  const s = storeFor(i);
+  const p = s ? pick(i, s) : null;
+  const open = data.open.has(i);
+  const source = data.compared[i];
+  const cheaper = cheaperAt(i);
+
+  let product;
+  if (p) {
+    const url = safeUrl(p.url);
+    product = el("div", { class: "product" },
       photo(p.image),
       el("div", {},
         url ? el("a", { class: "pname", href: url, target: "_blank", rel: "noopener" }, p.name) : el("span", { class: "pname" }, p.name),
-        el("p", { class: "meta" }, meta),
-        el("p", { class: "meta" }, el("strong", {}, money.format(p.price)), p.was_price ? ` · on special, was ${money.format(p.was_price)}` : null),
-        chooser));
+        el("p", { class: "meta" }, [howMany(p), productMeta(p)].filter(Boolean).join(" · ")),
+        tags(p, true)));
+  } else {
+    const has = STORES.filter((x) => pick(i, x.id));
+    product = el("div", { class: "product none" }, has.length
+      ? `${storeById(data.plan).name} doesn't seem to sell this. Tap ${has[0].name} below to buy it there.`
+      : item.matches[STORES[0].id].error || item.matches[STORES[1].id].error
+        ? "Couldn't check the shops for this item."
+        : "Neither shop seems to sell this.");
+  }
+
+  const choose = el("div", { class: "switch", role: "group", "aria-label": `Where to buy ${item.name}` }, STORES.map((store) => {
+    const at = pick(i, store.id);
+    const on = s === store.id;
+    const button = el("button", { type: "button", class: on ? "on" : "", "aria-pressed": String(on), disabled: !at },
+      storeDot(store.id),
+      el("span", { class: "switch-name" }, store.name),
+      el("span", { class: "switch-price" }, at ? money.format(at.cost) : "Not sold",
+        cheaper === store.id ? el("span", { class: "switch-cheaper" }, " Cheaper") : null));
+    button.addEventListener("click", () => {
+      data.storeFor[i] = store.id === planStore(i, data.plan) ? null : store.id;
+      redraw();
+    });
+    return button;
   }));
+
+  const candidates = s ? item.matches[s].candidates : [];
+  const toggle = candidates.length > 1
+    ? el("button", { class: "text-button", type: "button", "aria-expanded": String(open), onclick: () => {
+      if (open) data.open.delete(i);
+      else data.open.add(i);
+      redraw();
+    } }, open ? "Done" : "Choose a different product")
+    : null;
+
+  return el("li", { class: "item" },
+    el("div", { class: "item-head" },
+      el("span", { class: "name" }, nice(item.name)),
+      el("span", { class: "cost" }, p ? money.format(p.cost) : "–")),
+    product,
+    choose,
+    toggle,
+    open && s ? choices(item, i, s, source, redraw) : null);
+}
+
+function choices(item, i, storeId, source, redraw) {
+  const store = storeById(storeId);
+  const current = data.picks[i][storeId] || 0;
+  const match = item.matches[storeId];
+  return el("div", { class: "choices" },
+    el("p", { class: "note" }, source && source.display ? `Your recipes need ${source.display}. ` : "", `Pick the ${store.name} product you want:`),
+    match.candidates.map((cand, j) => {
+      const on = j === current;
+      const button = el("button", { type: "button", class: `choice${on ? " on" : ""}`, "aria-pressed": String(on) },
+        photo(cand.image),
+        el("span", { class: "choice-text" },
+          el("span", { class: "pname" }, cand.name),
+          el("span", { class: "meta" }, [howMany(cand), productMeta(cand)].filter(Boolean).join(" · ")),
+          tags(cand)),
+        el("span", { class: "choice-cost" }, money.format(cand.cost)));
+      button.addEventListener("click", () => {
+        data.picks[i][storeId] = j;
+        // Remember it, so Thermohub picks it first next time.
+        api("choices", { method: "POST", body: JSON.stringify({ store: storeId, key: item.key, product_id: cand.id, name: cand.name }) }).catch(failed);
+        redraw();
+      });
+      return button;
+    }));
+}
+
+// -- Sending the basket to the shops' carts --
+
+function sendAction() {
+  if (screenName() !== "compare" || !data.comparison) return;
+  const b = basket();
+  if (!b.count) {
+    showAction(el("button", { class: "button primary wide", type: "button", disabled: true }, "Nothing to send"));
+    return;
+  }
+  const names = listOf(b.shops.map((s) => s.name));
+  const total = el("span", { class: "button-total" }, money.format(b.total));
+  if (!data.accounts) {
+    showAction(el("button", { class: "button primary wide split", type: "button", disabled: true }, `Send to ${names}`, total));
+    return;
+  }
+  const missing = b.shops.find((s) => !signedIn(s.id));
+  if (missing) {
+    showAction(el("button", { class: "button primary wide", type: "button", onclick: () => {
+      data.returnTo = "compare";
+      go(`signin/${missing.id}`);
+    } }, icon("lock"), `Sign in to ${missing.name} to send`));
+    return;
+  }
+  showAction(el("button", { class: "button primary wide split", type: "button", onclick: () => sendBasket(b) },
+    `Send ${plural(b.count, "item")} to ${names}`, total));
+}
+
+function sendBasket(b) {
+  startCart({
+    orders: b.shops.map((s) => ({
+      store: s.id,
+      lines: b.orders[s.id].map(({ item, p }) => ({ product_id: p.id, name: p.name, url: p.url, quantity: p.packs, key: item.key })),
+    })),
+  });
+}
+
+// -- Filling the carts --
+
+const CART_JOB = "thermohub-cart-job";
+
+async function startCart(request) {
+  data.cartRequest = request;
+  data.cartJob = null;
+  data.cartError = null;
+  go("cart");
+  try {
+    data.cartJob = await api("carts", { method: "POST", body: JSON.stringify(request) });
+    try { sessionStorage.setItem(CART_JOB, data.cartJob.id); } catch { /* storage blocked */ }
+  } catch (err) {
+    data.cartError = err;
+  }
+  if (screenName() === "cart") render();
+}
+
+function showCart(root) {
+  const body = el("div", { class: "stack", style: "gap: 18px" });
+  root.append(header(true), body);
+  if (data.cartError) {
+    if (data.cartError instanceof NeedsKey) return showKeyScreen();
+    fill(body, el("div", { class: "card message" },
+      el("h2", {}, "Couldn't start adding to your cart"),
+      el("p", {}, data.cartError.message),
+      el("div", {}, el("button", { class: "button primary small", type: "button", onclick: () => startCart(data.cartRequest) }, "Try again"))));
+    return;
+  }
+  if (data.cartJob) {
+    drawCart(body);
+    if (!data.cartJob.finished) followCart(body);
+    return;
+  }
+  let saved = null;
+  try { saved = sessionStorage.getItem(CART_JOB); } catch { /* storage blocked */ }
+  if (!data.cartRequest && !saved) return go("list");
+  fill(body, el("div", { class: "title" }, el("h1", {}, "Sending to your cart…")),
+    el("div", { class: "card working" }, el("span", { class: "spinner" }), "Starting…"));
+  if (!data.cartRequest && saved) {
+    api(`carts/${saved}`)
+      .then((job) => {
+        data.cartJob = job;
+        if (body.isConnected) render();
+      })
+      .catch((err) => {
+        if (err instanceof NeedsKey) return showKeyScreen();
+        try { sessionStorage.removeItem(CART_JOB); } catch { /* storage blocked */ }
+        if (body.isConnected) go("list");
+      });
+  }
+}
+
+// Check on the cart job every couple of seconds while this screen is open.
+function followCart(body) {
+  setTimeout(async () => {
+    if (!body.isConnected) return;
+    try {
+      data.cartJob = await api(`carts/${data.cartJob.id}`);
+    } catch (err) {
+      if (err instanceof NeedsKey) return showKeyScreen();
+      if (err.status === 404) {
+        data.cartJob = null;
+        data.cartRequest = null;
+        return body.isConnected && go("list");
+      }
+      return body.isConnected && followCart(body); // Thermohub blinked; keep trying
+    }
+    if (!body.isConnected) return;
+    drawCart(body);
+    if (data.cartJob.finished) data.accounts = null; // a shop may have signed out
+    else followCart(body);
+  }, 1500);
+}
+
+function drawCart(body) {
+  const job = data.cartJob;
+  const lines = job.orders.flatMap((o) => o.lines);
+  const added = lines.filter((l) => l.status === "added").length;
+  const carts = `${listOf(job.orders.map((o) => o.name))} cart${job.orders.length > 1 ? "s" : ""}`;
+  let title;
+  let sub;
+  if (!job.finished) {
+    title = `Adding to your ${carts}…`;
+    sub = "Thermohub is adding each item on the shop's website, a few seconds each. You can leave this page; it carries on.";
+  } else if (added === lines.length) {
+    title = "All done!";
+    sub = `${plural(added, "item")} ${added === 1 ? "is" : "are"} in your ${carts}. Check out on the shop's website or app as usual.`;
+  } else if (added) {
+    title = `${added} of ${plural(lines.length, "item")} added`;
+    sub = "The rest need a hand. See below.";
+  } else {
+    title = "Nothing was added";
+    sub = "See below for what went wrong.";
+  }
+  fill(body,
+    el("div", { class: "title" }, el("h1", {}, title), el("p", {}, sub)),
+    // With one shop, its cart button sits at the bottom of the screen instead.
+    job.orders.map((order) => orderCard(order, job.orders.length > 1)),
+    job.finished ? el("div", {}, el("a", { class: "button secondary small", href: "#list" }, "Back to shopping list")) : null);
+
+  const done = job.orders.filter((o) => o.lines.some((l) => l.status === "added") && safeUrl(o.cart_url));
+  if (job.finished && job.orders.length === 1 && done.length === 1) {
+    showAction(el("a", { class: "button primary wide", href: done[0].cart_url, target: "_blank", rel: "noopener" },
+      `Open my ${done[0].name} cart`, icon("open")));
+  } else {
+    hideAction();
+  }
+}
+
+const LINE_ICON = { waiting: "circle", added: "check", failed: "warn", skipped: "minus" };
+const ORDER_STATE = { waiting: "Waiting", running: "Adding…", done: "Done", needs_sign_in: "Needs you to sign in", failed: "Stopped" };
+
+function orderCard(order, cartLink) {
+  const missed = order.lines.filter((l) => l.status === "failed" || l.status === "skipped");
+  const retry = missed.length
+    ? el("button", { class: "button secondary small", type: "button", onclick: () => startCart({
+      orders: [{
+        store: order.store,
+        lines: missed.map((l) => ({ product_id: l.product_id, name: l.name, url: l.url, quantity: l.quantity, key: l.key })),
+      }],
+    }) }, missed.length === order.lines.length ? "Try again" : `Try the ${plural(missed.length, "missed item")} again`)
+    : null;
+
+  let foot = null;
+  if (order.state === "needs_sign_in") {
+    foot = el("div", { class: "order-foot attention" },
+      el("p", {}, `${order.name} needs you to sign in before Thermohub can add to your cart.`),
+      el("div", { class: "confirm" },
+        el("button", { class: "button primary small", type: "button", onclick: () => {
+          data.returnTo = "cart";
+          go(`signin/${order.store}`);
+        } }, `Sign in to ${order.name}`),
+        retry));
+  } else if (order.state === "failed") {
+    foot = el("div", { class: "order-foot attention" }, el("p", {}, order.message || "Something went wrong."), el("div", {}, retry));
+  } else if (order.state === "done" && (missed.length || cartLink)) {
+    const added = order.lines.some((l) => l.status === "added");
+    foot = el("div", { class: "order-foot" }, el("div", { class: "confirm" }, retry,
+      cartLink && added && safeUrl(order.cart_url) ? el("a", { class: "text-button", href: order.cart_url, target: "_blank", rel: "noopener" }, `Open my ${order.name} cart`) : null));
+  }
+
+  return el("div", { class: "card order" },
+    el("div", { class: "order-head" },
+      el("span", { class: "store" }, storeDot(order.store), order.name),
+      el("span", { class: `order-state ${order.state}` }, ORDER_STATE[order.state] || "")),
+    el("ul", { class: "rows" }, order.lines.map((line) => el("li", { class: `cart-line ${line.status}` },
+      line.status === "adding" ? el("span", { class: "spinner small" }) : icon(LINE_ICON[line.status] || "circle"),
+      el("span", { class: "cart-name" }, line.name),
+      el("span", { class: "cart-qty" }, `× ${line.quantity}`),
+      line.status === "failed" ? el("div", { class: "cart-problem" },
+        el("p", {}, line.message || "Couldn't add this one."),
+        safeUrl(line.url) ? el("a", { href: line.url, target: "_blank", rel: "noopener" }, `Add it yourself on the ${order.name} website`) : null,
+        line.screenshot && line.screenshot.startsWith("data:image/")
+          ? el("details", { class: "details" }, el("summary", {}, "What Thermohub saw"), el("img", { class: "seen", src: line.screenshot, alt: `The ${order.name} page for ${line.name}` }))
+          : null) : null))),
+    foot);
+}
+
+// -- Signing in to a shop, on its own website, inside Thermohub --
+
+const SIGN_IN_FIELD = {
+  password: { type: "password", placeholder: "Type your password here", autocomplete: "current-password" },
+  code: { type: "text", placeholder: "Type the code here", autocomplete: "one-time-code", inputMode: "numeric" },
+  number: { type: "text", placeholder: "Type the number here", autocomplete: "off", inputMode: "numeric" },
+  email: { type: "email", placeholder: "Type your email here", autocomplete: "username" },
+  tel: { type: "tel", placeholder: "Type your phone number here", autocomplete: "tel" },
+  text: { type: "text", placeholder: "Type here", autocomplete: "off" },
+};
+const clamp = (n, low, high) => Math.max(low, Math.min(high, n));
+
+function showSignIn(root, storeId) {
+  const store = storeById(storeId);
+  if (!store) return go("accounts");
+  const back = data.returnTo || "accounts";
+  const address = el("span", { class: "live-host" }, "Opening…");
+  const image = el("img", { alt: `The ${store.name} website` });
+  image.draggable = false;
+  const cover = el("div", { class: "live-cover" }, el("span", { class: "spinner" }), `Opening the ${store.name} website…`);
+  const screen = el("div", { class: "live-screen", role: "application", "aria-label": `${store.name} website. Tap to use it.` }, image, cover);
+  const typing = el("input", {
+    class: "typing-input", type: "text", autocapitalize: "off", autocomplete: "off",
+    enterKeyHint: "go", placeholder: "Tap a box on the page first", "aria-label": `Type into the ${store.name} page`,
+  });
+  typing.setAttribute("autocorrect", "off");
+  typing.spellcheck = false;
+  const tools = el("div", { class: "live-tools" },
+    el("button", { class: "text-button", type: "button", onclick: () => send({ type: "back" }) }, "Go back a page"),
+    el("button", { class: "text-button", type: "button", onclick: () => send({ type: "restart" }) }, "Start again"));
+  root.append(
+    header({ href: `#${back}`, label: "Back" }),
+    el("div", { class: "title" }, el("h1", {}, `Sign in to ${store.name}`),
+      el("p", {}, `This is the ${store.name} website, running on your Thermohub. Sign in as usual. If ${store.name} sends you a code, type that in too.`)),
+    el("div", { class: "live" },
+      el("div", { class: "live-address" }, icon("lock"), address),
+      screen,
+      el("div", { class: "typing" }, typing),
+      tools,
+      el("p", { class: "note" }, `Thermohub stays signed in so it can fill your cart, like a browser does. You can sign out in Settings.`)));
+
+  // The page in Thermohub's browser is the size of the box on this screen.
+  const width = clamp(Math.round(screen.getBoundingClientRect().width), 320, 1280);
+  const height = clamp(Math.round(window.innerHeight - 300), 480, Math.min(1400, Math.round(width * 1.9)));
+  screen.style.aspectRatio = `${width} / ${height}`;
+
+  const base = location.pathname.replace(/[^/]*$/, "");
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${base}api/stores/${store.id}/sign-in`);
+  let finished = false;
+  let frameUrl = null;
+  const send = (message) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(message));
+  const problem = (text) => {
+    finished = true;
+    fill(cover, el("p", {}, text), el("button", { class: "button secondary small", type: "button", onclick: render }, "Try again"));
+    cover.hidden = false;
+    doneButton.disabled = true;
+  };
+
+  ws.addEventListener("open", () => send({ type: "hello", width, height, scale: Math.min(window.devicePixelRatio || 1, 2), key: accessKey }));
+  ws.addEventListener("message", (event) => {
+    if (typeof event.data !== "string") {
+      const next = URL.createObjectURL(event.data);
+      image.addEventListener("load", () => frameUrl && URL.revokeObjectURL(frameUrl), { once: true });
+      const previous = frameUrl;
+      frameUrl = next;
+      image.src = next;
+      if (previous) setTimeout(() => URL.revokeObjectURL(previous), 1000);
+      if (!finished) cover.hidden = true;
+      return;
+    }
+    const message = JSON.parse(event.data);
+    if (message.type === "address") {
+      try {
+        const url = new URL(message.url);
+        address.textContent = url.host.replace(/^www\./, "") + (url.pathname === "/" ? "" : url.pathname);
+      } catch { /* not a web address */ }
+    } else if (message.type === "editable") {
+      fieldFocused(message.value ? message.field || "text" : null);
+    } else if (message.type === "error") {
+      problem(message.message);
+    } else if (message.type === "result") {
+      finished = true;
+      data.accounts = null;
+      data.status = null;
+      if (message.signed_in) signedInNow();
+      else problem(`${store.name} doesn't show you as signed in yet. Try again, and wait for your account page to appear before pressing the button.`);
+    }
+  });
+  ws.addEventListener("close", () => !finished && problem("Lost the connection to Thermohub."));
+
+  // Taps and swipes on the picture are passed to the page; swipes scroll it.
+  let start = null;
+  let lastY = 0;
+  let scrolling = false;
+  let pending = 0;
+  let timer = null;
+  const toPage = (event) => {
+    const box = screen.getBoundingClientRect();
+    return { x: ((event.clientX - box.left) / box.width) * width, y: ((event.clientY - box.top) / box.height) * height };
+  };
+  const scroll = (dy) => {
+    pending += dy;
+    timer = timer || setTimeout(() => {
+      send({ type: "scroll", dy: Math.round(pending) });
+      pending = 0;
+      timer = null;
+    }, 60);
+  };
+  screen.addEventListener("pointerdown", (event) => {
+    start = { x: event.clientX, y: event.clientY };
+    lastY = event.clientY;
+    scrolling = false;
+    screen.setPointerCapture(event.pointerId);
+  });
+  screen.addEventListener("pointermove", (event) => {
+    if (!start) return;
+    if (Math.abs(event.clientY - start.y) > 8) scrolling = true;
+    if (scrolling) {
+      scroll(((lastY - event.clientY) / screen.getBoundingClientRect().height) * height);
+      lastY = event.clientY;
+    }
+  });
+  screen.addEventListener("pointerup", (event) => {
+    if (start && !scrolling && !finished) send({ type: "tap", ...toPage(event) });
+    start = null;
+  });
+  screen.addEventListener("pointercancel", () => (start = null));
+  screen.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    scroll(event.deltaY);
+  }, { passive: false });
+
+  // Typing happens in the box under the picture and is copied to the page as it changes.
+  let sent = "";
+  const fieldFocused = (field) => {
+    typing.value = "";
+    sent = "";
+    const kind = SIGN_IN_FIELD[field] || null;
+    typing.type = kind ? kind.type : "text";
+    typing.placeholder = kind ? kind.placeholder : "Tap a box on the page first";
+    typing.autocomplete = kind ? kind.autocomplete : "off";
+    typing.inputMode = (kind && kind.inputMode) || "";
+    typing.parentElement.classList.toggle("ready", Boolean(kind));
+    if (kind && matchMedia("(pointer: fine)").matches) typing.focus({ preventScroll: true });
+  };
+  typing.addEventListener("input", () => {
+    const now = typing.value;
+    let same = 0;
+    while (same < sent.length && same < now.length && sent[same] === now[same]) same++;
+    for (let k = Math.min(sent.length - same, 200); k > 0; k--) send({ type: "key", key: "Backspace" });
+    if (now.length > same) send({ type: "text", text: now.slice(same) });
+    sent = now;
+  });
+  typing.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      send({ type: "key", key: "Enter" });
+      typing.value = "";
+      sent = "";
+    } else if (event.key === "Backspace" && !typing.value) {
+      send({ type: "key", key: "Backspace" });
+    }
+  });
+
+  const doneButton = el("button", { class: "button primary wide", type: "button" }, "I've signed in");
+  doneButton.addEventListener("click", () => {
+    doneButton.disabled = true;
+    doneButton.textContent = "Checking…";
+    fill(cover, el("span", { class: "spinner" }), `Checking with ${store.name}…`);
+    cover.hidden = false;
+    send({ type: "done" });
+  });
+  showAction(doneButton);
+
+  const signedInNow = () => {
+    leaveScreen = null;
+    ws.close();
+    hideAction();
+    fill(app(),
+      header({ href: `#${back}`, label: "Back" }),
+      el("div", { class: "card message done" },
+        el("span", { class: "big-check" }, icon("check")),
+        el("h2", {}, `You're signed in to ${store.name}`),
+        el("p", {}, `Thermohub can now add things to your ${store.name} cart.`)));
+    showAction(el("button", { class: "button primary wide", type: "button", onclick: () => go(back) },
+      back === "compare" ? "Back to prices" : back === "cart" ? "Back to your cart" : "Done"));
+  };
+
+  leaveScreen = () => {
+    finished = true;
+    send({ type: "cancel" });
+    ws.close();
+    if (frameUrl) URL.revokeObjectURL(frameUrl);
+  };
 }
 
 // -- Settings --
@@ -587,21 +1158,19 @@ function showSettings(root) {
   const storeRows = Object.fromEntries(STORES.map((s) => [s.id, el("li", {}, accountRow(SERVICES.find((x) => x.id === s.id), "Checking…", el("span", { class: "spinner" })))]));
   const recheck = el("button", { class: "button secondary small", type: "button" }, "Check again");
 
-  const drawStores = (status) => {
-    for (const s of STORES) {
-      const c = status.connections.find((x) => x.id === s.id);
-      if (!c) continue;
-      const ok = c.state === "connected";
-      fill(storeRows[s.id], accountRow(SERVICES.find((x) => x.id === s.id), ok ? "Prices are working" : c.summary,
-        el("span", { class: `side ${ok ? "ok" : "problem"}` }, ok ? [icon("check"), "Working"] : "Not responding"),
-        ok ? null : el("div", { class: "more" }, el("p", { class: "note" }, "Thermohub will keep trying. You can still compare using the other shop."), details(c.detail))));
-    }
+  const drawStores = () => {
+    for (const s of STORES) drawStore(storeRows[s.id], s, drawStores);
   };
-  const loadStores = (force) => loadStatus(force).then(drawStores).catch(failed);
+  const loadStores = (force) => {
+    loadAccounts(force).then(drawStores).catch(failed);
+    return loadStatus(force).then(drawStores).catch(failed);
+  };
   recheck.addEventListener("click", async () => {
     recheck.disabled = true;
     recheck.textContent = "Checking…";
-    for (const s of STORES) fill(storeRows[s.id], accountRow(SERVICES.find((x) => x.id === s.id), "Checking…", el("span", { class: "spinner" })));
+    data.accounts = null;
+    data.status = null;
+    drawStores();
     await Promise.all([loadStores(true), drawCookidoo(cookidooRow)]);
     recheck.disabled = false;
     recheck.textContent = "Check again";
@@ -613,10 +1182,48 @@ function showSettings(root) {
     el("div", { class: "stack" },
       el("p", { class: "section-label" }, "Accounts"),
       el("ul", { class: "card rows" }, cookidooRow, STORES.map((s) => storeRows[s.id])),
-      el("p", { class: "note", style: "padding: 0 4px" }, "You don't need a Woolworths or Coles account to compare prices.")),
+      el("p", { class: "note", style: "padding: 0 4px" }, "Comparing prices works without signing in to the shops. Sign in to a shop to send items to its cart.")),
     el("div", {}, recheck));
+  drawStores();
   loadStores(false);
   drawCookidoo(cookidooRow);
+}
+
+function drawStore(row, store, redraw) {
+  const service = SERVICES.find((x) => x.id === store.id);
+  const c = data.status && data.status.connections.find((x) => x.id === store.id);
+  const account = data.accounts && data.accounts.find((a) => a.id === store.id);
+  if (!account) {
+    fill(row, accountRow(service, "Checking…", el("span", { class: "spinner" })));
+    return;
+  }
+  const prices = !c ? null : c.state === "connected" ? null
+    : el("div", { class: "stack" }, el("p", { class: "note" }, `${c.summary} Thermohub will keep trying. You can still compare using the other shop.`), details(c.detail));
+  if (!account.signed_in) {
+    fill(row, accountRow(service, "Not signed in. Sign in to send items to your cart.",
+      el("a", { class: "button secondary small", href: `#signin/${store.id}`, onclick: () => (data.returnTo = "accounts") }, "Sign in"),
+      prices ? el("div", { class: "more" }, prices) : null));
+    return;
+  }
+  const signOut = el("button", { class: "text-button", type: "button" }, "Sign out");
+  const more = el("div", { class: "more" }, prices, el("div", {}, signOut));
+  signOut.addEventListener("click", () => {
+    fill(more, el("p", {}, `Sign out of ${store.name}? Thermohub won't be able to fill your ${store.name} cart until you sign in again.`),
+      el("div", { class: "confirm" },
+        el("button", { class: "button primary small", type: "button", onclick: async (event) => {
+          event.currentTarget.disabled = true;
+          try {
+            await api(`stores/${store.id}/sign-out`, { method: "POST" });
+            await loadAccounts(true);
+          } catch (err) {
+            return failed(err);
+          }
+          redraw();
+        } }, "Sign out"),
+        el("button", { class: "button secondary small", type: "button", onclick: redraw }, "Cancel")));
+  });
+  fill(row, accountRow(service, "Signed in. Thermohub can fill your cart.",
+    el("span", { class: "side ok" }, icon("check"), "Signed in"), more));
 }
 
 function accountRow(service, state, side, more = null) {

@@ -9,16 +9,23 @@ as a Docker container on Unraid (or any Docker host) on your home network.
 - Pulls the shopping list and merges it into one list of things to buy.
   Ingredients needed by several recipes become one entry with totals
   ("3 brown onions"). Items you've ticked off in Cookidoo are left out.
-- Prices the items you pick at Woolworths and Coles and tells you which is
-  cheaper, and what splitting the shop between them would cost.
+- Prices the items you pick at Woolworths and Coles, for the amount your
+  recipes need (two 400 g tins for 800 g of tomatoes), and tells you which
+  shop is cheaper.
+- Lets you choose where to shop: everything at Woolworths, everything at
+  Coles, or each item wherever it's cheaper, and move single items between
+  shops.
+- Picks a sensible product for each ingredient (the one you chose last time,
+  else the cheapest real match) and remembers what you choose.
+- Sends the items to your Woolworths and/or Coles cart. You sign in to the
+  shops once, on their own websites, inside Thermohub.
 - Shows, in plain language, whether Cookidoo, Woolworths and Coles are
-  connected, and lets you connect Cookidoo from a Settings page.
+  connected, with a Settings page for the accounts.
 
 Open `http://<host>:8000/`; it works on a phone too.
 
-**Planned:** sign in to your Woolworths/Coles accounts to fill the cart, and
-learn your preferred products from order history (with reminders for things
-you buy regularly). See [Roadmap](#roadmap).
+**Planned:** learn your preferred products from order history, with reminders
+for things you buy regularly. See [Roadmap](#roadmap).
 
 > None of these services has a public API. Cookidoo goes through the unofficial
 > [`cookidoo-api`](https://github.com/miaucl/cookidoo-api) library (the one
@@ -53,12 +60,19 @@ The template defaults:
 - **Port:** 8000. Change the host port if something else (e.g. Portainer)
   already uses it.
 - **Appdata:** `/mnt/user/appdata/thermohub`. It holds the Cookidoo sign-in
-  (tokens, your email and region), never your password.
+  (tokens, your email and region, never your password), the Woolworths and
+  Coles browser profiles (their sign-in cookies), and the products you chose.
 - **PUID/PGID:** 99/100 (`nobody:users`), the Unraid convention for appdata
   ownership.
 
-Keep it on your LAN. Don't port-forward it to the internet; it has your
-Cookidoo session behind it.
+Keep it on your LAN. Don't port-forward it to the internet: it has your
+Cookidoo session and your Woolworths and Coles sign-ins behind it. Set an
+**Access key** if other people use your network.
+
+The image includes Chromium (about 500 MB) for the shop sign-in and cart
+filling. It only runs while you sign in or while a cart is being filled, and
+closes after five idle minutes; expect it to use 300 to 500 MB of memory
+while it runs.
 
 ## Run anywhere else with Docker Compose
 
@@ -80,7 +94,8 @@ Everything a person needs is on the Settings page. These environment variables
 | `COOKIDOO_EMAIL` / `COOKIDOO_PASSWORD` | (unset) | Sign in to Cookidoo automatically with these, until someone signs out on the page |
 | `COOKIDOO_COUNTRY` / `COOKIDOO_LANGUAGE` | `au` / `en-AU` | Cookidoo site to use until one is picked on the page |
 | `PUID` / `PGID` | `99` / `100` | User and group the app runs as and that owns `/data` |
-| `THERMOHUB_DATA_DIR` | `/data` | Where the Cookidoo sign-in is kept |
+| `THERMOHUB_DATA_DIR` | `/data` | Where the Cookidoo sign-in, shop browser profiles and chosen products are kept |
+| `THERMOHUB_CHROMIUM` | `/usr/bin/chromium` in the image | Chromium to use for the shops; unset uses Playwright's own download |
 
 Connecting Cookidoo on the Settings page uses the password once, to sign in.
 Thermohub keeps the resulting tokens in `/data/cookidoo_token.json` (refreshed
@@ -99,17 +114,50 @@ tap targets, and no technical wording unless they open **Details**.
   turns amber when something needs a look, and tapping it opens Settings.
   On the first visit this screen asks you to connect Cookidoo instead.
 - **Comparison:** one answer at the top ("Coles is cheaper, save $4.40"),
-  each shop's total, a tip when buying from both would save more, and each
-  item with its price at both shops. Tap an item to see the products and, if
-  the match is wrong (loose onions instead of a 1 kg bag), choose another;
-  the totals update.
-- **Settings:** your Cookidoo account (connect or sign out) and whether
-  Woolworths and Coles are working, with **Check again**.
+  then **Where do you want to shop?**: all at Woolworths, all at Coles, or
+  (when it saves at least 50c) both shops, each item wherever it's cheaper,
+  each with its total. Below, every item shows the product it will be, how
+  many, and a Woolworths/Coles switch with both prices to move just that
+  item. **Choose a different product** lists the alternatives; the one you
+  pick is remembered for next time. Small labels explain the picks: *You
+  usually buy this*, *Best value* (lowest price per kg/L), *On special*, and
+  *Check this is right* when no product clearly matched.
+- **Send to cart:** the button at the bottom sends the basket. If a shop
+  isn't signed in yet, it says **Sign in to Coles to send** and takes you
+  there first. A progress screen ticks items off as they go into the cart,
+  then offers **Open my Coles cart**. Anything that couldn't be added gets a
+  link to add it yourself and a picture of what Thermohub saw.
+- **Shop sign-in:** the real Woolworths or Coles website, running in
+  Thermohub's own browser and shown on your screen. Tap the boxes on the
+  page and type in the box underneath (it turns into a password box for
+  passwords, and offers texted codes on phones). Press **I've signed in**
+  when your account page appears.
+- **Settings:** your Cookidoo account (connect or sign out), and for each
+  shop whether Thermohub is signed in (sign in or out) and whether prices
+  are working, with **Check again**.
 
-Totals count one of each product and only include items both shops have;
-recipe quantities aren't matched to pack sizes yet. Woolworths and Coles
-don't need an account to compare prices; their accounts will come with cart
-filling.
+The headline totals compare like for like: only items both shops have.
+
+### Signing in to the shops and filling the cart
+
+Woolworths and Coles have no way for other apps to sign in or add to a cart,
+and both use bot protection, so Thermohub runs Chromium and does what a
+person would: you sign in on the shop's own sign-in page (shown live in
+Thermohub, including any texted code), and Thermohub keeps that browser
+profile in `/data/browser/<shop>`, the way a browser stays signed in. Your
+password goes to the shop, not to Thermohub, which doesn't store it.
+
+To fill the cart, Thermohub opens each product's page in that browser and
+presses its **Add to cart** button, then steps the quantity up. This is the
+part most likely to need adjusting when a shop changes its website, which is
+why failed items come back with a screenshot. If the shop asks to sign in
+again, the progress screen says so and offers to sign in and retry.
+**Sign out** in Settings deletes the shop's browser profile.
+
+The live sign-in only accepts connections from Thermohub's own page (so
+another website open in your browser can't watch or drive it). Behind a
+reverse proxy, pass the original `Host` header through and allow WebSocket
+upgrades.
 
 ## How prices are looked up
 
@@ -210,17 +258,19 @@ Checks every connection live: Cookidoo (fetches the shopping list) and each
 store (searches for "milk"). `state` is one of `connected`, `not_set_up`,
 `needs_attention` (the person has to do something, such as sign in again) or
 `unavailable` (not working right now, nothing for them to fix). `summary` is
-written for the person; `detail` is the technical reason.
+written for the person; `detail` is the technical reason. For the shops,
+`state` is about prices and `signed_in` about the cart.
 
 ```json
 {
   "connections": [
     { "id": "cookidoo", "name": "Cookidoo", "state": "connected",
-      "summary": "Connected as you@example.com", "detail": null, "note": null },
+      "summary": "Connected as you@example.com", "detail": null, "note": null,
+      "signed_in": null },
     { "id": "coles", "name": "Coles", "state": "unavailable",
       "summary": "Coles isn't letting Thermohub check prices right now.",
       "detail": "Coles blocked the request (HTTP 403); its bot protection may be rejecting this server",
-      "note": "You don't need to sign in to Coles to compare prices." }
+      "note": "Sign in to send items to your Coles cart.", "signed_in": false }
   ]
 }
 ```
@@ -240,16 +290,49 @@ written for the person; `detail` is the technical reason.
 
 ### `POST /api/compare`
 
-Body: `{"items": ["brown onion", "garlic"]}` (1 to 60 names). Each name is
-searched at every store. Quantities at the start of free-text names ("350 g
-self-raising flour") are dropped from the search.
+Body: `{"items": [{"name": "crushed tomatoes", "key": "ref:<ingredient_ref>",
+"quantities": [{"amount": 800, "unit": "g"}]}]}` (1 to 60 items; plain names
+also work). Each name is searched at every store. Quantities at the start of
+free-text names ("350 g self-raising flour") are dropped from the search.
+`quantities` (as in the shopping list) work out how many packs to buy, and
+`key` (default: made from the name) identifies the ingredient for remembered
+choices.
 
-For each item, `matches.<store>.candidates` holds up to five available
-products in the store's relevance order (name, size, price, was-price, unit
-price per kg/L/each, image, link). The first is the pick. `cheaper` names the
-store whose pick costs less. `totals`, `split_total` and `cheapest` summarise
-the picks for the `compared` items that every store has. A store that
-couldn't be searched sets `matches.<store>.error`.
+For each item, `matches.<store>.candidates` holds up to six products, the
+pick first (name, size, price, was-price, unit price per kg/L/each, image,
+link), each with `packs`, `cost` (price × packs), `good_match` and `tags`
+(`usual`, `best_value`, `special`). The pick is the product remembered for
+that ingredient, else the cheapest good match for the amount needed, else the
+store's top result. `cheaper` names the store whose pick costs less.
+`totals`, `split_total` and `cheapest` summarise the picks for the
+`compared` items that every store has. A store that couldn't be searched sets
+`matches.<store>.error`.
+
+`POST /api/choices` with `{"store", "key", "product_id", "name"}` remembers a
+product as the pick for that ingredient at that store
+(`/data/preferences.json`). Products that make it into a cart are remembered
+the same way.
+
+### Shops and carts
+
+- `GET /api/stores`: for each shop, `signed_in` (Thermohub's browser is
+  signed in) and `cart_url`.
+- `WS /api/stores/{store}/sign-in`: the live sign-in. The first message is
+  `{"type": "hello", "width", "height", "scale", "key"}` (`key` is the access
+  key, if one is set). The server sends the page as binary JPEG frames, plus
+  `{"type": "address", "url"}`, `{"type": "editable", "value", "field"}`
+  after a tap (`field` is `password`, `code`, `email`, `tel`, `number` or
+  `text`), `{"type": "result", "signed_in"}` and `{"type": "error",
+  "message"}`. The page sends `tap` (`x`, `y`), `text`, `key`, `scroll`
+  (`dy`), `back`, `restart`, `done` or `cancel`.
+- `POST /api/stores/{store}/sign-out`: forgets the shop sign-in.
+- `POST /api/carts` with `{"orders": [{"store", "lines": [{"product_id",
+  "name", "url", "quantity", "key"}]}]}`: starts adding to the carts and
+  answers `202` with a job. Each `url` must be a page on that shop's site.
+- `GET /api/carts/{id}`: the job's progress. Each order has a `state`
+  (`waiting`, `running`, `done`, `needs_sign_in`, `failed`) and each line a
+  `status` (`waiting`, `adding`, `added`, `failed`, `skipped`), with a
+  `screenshot` data URL for failed lines.
 
 ### `GET /health`
 
@@ -275,8 +358,15 @@ COOKIDOO_EMAIL=... COOKIDOO_PASSWORD=... THERMOHUB_DATA_DIR=./data \
 | `thermohub/shopping_list.py` | Merging the raw list into `ShoppingList` |
 | `thermohub/stores/` | Woolworths and Coles product search |
 | `thermohub/compare.py` | Pricing items at each store and totalling |
+| `thermohub/smarts.py` | Pack counts, product matching, the pick, remembered choices |
+| `thermohub/browser.py` | Chromium for the shop sign-in (streamed to the page) and cart filling |
 | `thermohub/models.py` | Response models (also the OpenAPI schema) |
 | `unraid/thermohub.xml` | Unraid container template |
+
+`tests/test_browser.py` drives real Chromium against a small fake shop
+website. It uses `THERMOHUB_TEST_CHROMIUM` if set, else Playwright's own
+browser (`python -m playwright install chromium`). Inside the image,
+`python -m thermohub.browser` checks that Chromium starts.
 
 `cookidoo-api` is pinned to an exact version on purpose. The library's public
 getters drop the ingredient id, unit and category, so `cookidoo_client.py`
@@ -288,8 +378,8 @@ run them after bumping the version.
 
 1. ~~Cookidoo shopping list API and page~~
 2. ~~Woolworths and Coles price comparison~~
-3. Remember the product you choose for each ingredient; match recipe
-   quantities to pack sizes
-4. Sign in to Woolworths/Coles and fill the online cart
+3. ~~Remember the product you choose for each ingredient; match recipe
+   quantities to pack sizes~~
+4. ~~Sign in to Woolworths/Coles and fill the online cart~~
 5. Order history: preferred products, and "you usually buy this every N weeks"
    suggestions
