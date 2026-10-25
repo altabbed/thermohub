@@ -163,6 +163,19 @@ class Comparison(BaseModel):
     cheapest: StoreId | None
 
 
+class ComparisonJob(BaseModel):
+    """A comparison running on the server; ask again until `done`."""
+
+    id: str
+    done: bool
+    total: int = Field(description="How many items are being compared.")
+    checked: dict[StoreId, int] = Field(
+        description="How many items each store has been searched for so far."
+    )
+    result: Comparison | None = Field(default=None, description="The comparison, once done.")
+    error: str | None = None
+
+
 class CompareRequestItem(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     key: str | None = Field(default=None, description="Defaults to one made from the name.")

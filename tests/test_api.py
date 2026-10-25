@@ -1,6 +1,8 @@
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 import tempfile
+import time
 
 from cookidoo_api import CookidooAuthException, CookidooLocalizationConfig, CookidooRequestException
 from fastapi.testclient import TestClient
@@ -18,6 +20,7 @@ from thermohub.main import (
     app,
     get_browsers,
     get_cart_jobs,
+    get_comparisons,
     get_cookidoo,
     get_preferences,
     get_sites,
@@ -90,6 +93,7 @@ def make_client(
     preferences=None,
     browsers=None,
     jobs=None,
+    comparisons=None,
 ):
     settings = Settings(_env_file=None, THERMOHUB_API_KEY=api_key)
     cookidoo = cookidoo or FakeCookidoo()
@@ -97,6 +101,8 @@ def make_client(
     preferences = preferences or Preferences(Path(tempfile.mkdtemp()) / "preferences.json")
     browsers = browsers or FakeBrowsers()
     jobs = {} if jobs is None else jobs
+    comparisons = {} if comparisons is None else comparisons
+    app.dependency_overrides[get_comparisons] = lambda: comparisons
     app.dependency_overrides[get_browsers] = lambda: browsers
     app.dependency_overrides[get_sites] = lambda: SITES
     app.dependency_overrides[get_cart_jobs] = lambda: jobs
@@ -313,6 +319,78 @@ def test_compare_with_quantities_and_remembered_choice(tmp_path):
     assert coles["tags"] == ["usual"]
     assert preferences.usual("coles", "ref:milk") == "c-milk"
     assert preferences.usual_packs("coles", "ref:milk") == 3
+
+
+class SlowStore(FakeStore):
+    async def search(self, term):
+        await asyncio.sleep(0.2)
+        return await super().search(term)
+
+
+class BrokenStore(FakeStore):
+    async def search(self, term):
+        raise RuntimeError("bug")
+
+
+@asynccontextmanager
+async def no_lifespan(_app):
+    yield
+
+
+def wait_for_comparison(client, run_id):
+    for _ in range(100):
+        body = client.get(f"/api/comparisons/{run_id}").json()
+        if body["done"]:
+            return body
+        time.sleep(0.05)
+    raise AssertionError("the comparison never finished")
+
+
+def test_comparison_runs_in_the_background(monkeypatch):
+    # A client used as a context manager keeps one event loop for the
+    # background task; the real lifespan (Cookidoo) is swapped out.
+    monkeypatch.setattr(app.router, "lifespan_context", no_lifespan)
+    stores = [
+        SlowStore("woolworths", {"milk": [product("woolworths", "w-milk", 3.10)]}),
+        SlowStore("coles", {"milk": [product("coles", "c-milk", 3.00)]}),
+    ]
+    runs = {}
+    with make_client(stores=stores, comparisons=runs) as client:
+        started = client.post("/api/comparisons", json={"items": ["milk", "bread"]})
+
+        assert started.status_code == 202
+        job = started.json()
+        assert (job["done"], job["total"], job["checked"]) == (
+            False,
+            2,
+            {"woolworths": 0, "coles": 0},
+        )
+        assert job["result"] is None
+        finished = wait_for_comparison(client, job["id"])
+
+    assert finished["checked"] == {"woolworths": 2, "coles": 2}
+    assert finished["result"]["cheapest"] == "coles"
+    assert finished["error"] is None
+
+
+def test_comparison_that_fails(monkeypatch):
+    monkeypatch.setattr(app.router, "lifespan_context", no_lifespan)
+    stores = [BrokenStore("woolworths", {}), FakeStore("coles", {})]
+    with make_client(stores=stores) as client:
+        job = client.post("/api/comparisons", json={"items": ["milk"]}).json()
+        finished = wait_for_comparison(client, job["id"])
+
+    assert finished["result"] is None
+    assert "Something went wrong" in finished["error"]
+
+
+def test_old_comparisons_expire():
+    client = make_client()
+
+    response = client.get("/api/comparisons/nope")
+
+    assert response.status_code == 404
+    assert "Compare again" in response.json()["detail"]
 
 
 def test_compare_needs_items():

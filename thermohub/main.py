@@ -4,9 +4,11 @@ import asyncio
 import base64
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 import logging
 from pathlib import Path
 import secrets
+import time
 from typing import Annotated, Any
 from urllib.parse import urlparse
 import uuid
@@ -50,6 +52,7 @@ from thermohub.models import (
     ChoiceRequest,
     CompareRequest,
     Comparison,
+    ComparisonJob,
     Connection,
     ConnectionState,
     CookidooAccount,
@@ -58,6 +61,7 @@ from thermohub.models import (
     SignInRequest,
     Status,
     StoreAccount,
+    StoreId,
     StoreProduct,
 )
 from thermohub.shopping_list import build_shopping_list
@@ -82,6 +86,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.browsers = Browsers(get_settings().data_dir, get_settings().chromium)
     app.state.sites = SITES
     app.state.cart_jobs = {}
+    app.state.comparisons = {}
     try:
         yield
     finally:
@@ -113,6 +118,21 @@ def get_sites(connection: HTTPConnection) -> dict[str, StoreSite]:
 
 def get_cart_jobs(request: Request) -> dict[str, CartJob]:
     return request.app.state.cart_jobs
+
+
+@dataclass
+class ComparisonRun:
+    id: str
+    total: int
+    checked: dict[str, int]
+    started: float
+    done: bool = False
+    result: Comparison | None = None
+    error: str | None = None
+
+
+def get_comparisons(request: Request) -> dict[str, ComparisonRun]:
+    return request.app.state.comparisons
 
 
 def require_api_key(
@@ -263,6 +283,68 @@ async def search_store(
         return await store.search(q)
     except StoreError as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
+
+
+@api.post("/comparisons", response_model=ComparisonJob, status_code=202)
+async def start_comparison(
+    request: CompareRequest,
+    stores: Annotated[list[Store], Depends(get_stores)],
+    preferences: Annotated[Preferences, Depends(get_preferences)],
+    runs: Annotated[dict[str, ComparisonRun], Depends(get_comparisons)],
+) -> ComparisonJob:
+    """The same comparison as POST /api/compare, run in the background.
+
+    A long list can take a minute or two. The page follows it with GET
+    /api/comparisons/{id} instead of holding one request open that long (which
+    phones give up on), and can pick it up again after a reload.
+    """
+    run = ComparisonRun(
+        id=uuid.uuid4().hex,
+        total=len(request.items),
+        checked={store.id: 0 for store in stores},
+        started=time.time(),
+    )
+    for old in sorted(runs.values(), key=lambda r: r.started)[:-9]:
+        runs.pop(old.id, None)  # keep the last 10
+    runs[run.id] = run
+
+    def searched(store_id: StoreId) -> None:
+        run.checked[store_id] = min(run.checked.get(store_id, 0) + 1, run.total)
+
+    async def work() -> None:
+        try:
+            run.result = await compare(request.items, stores, preferences, searched)
+        except Exception:
+            logging.getLogger(__name__).exception("Comparison failed")
+            run.error = "Something went wrong while comparing. Please try again."
+        finally:
+            run.done = True
+
+    task = asyncio.create_task(work())
+    _running.add(task)
+    task.add_done_callback(_running.discard)
+    return _comparison_view(run)
+
+
+@api.get("/comparisons/{run_id}", response_model=ComparisonJob)
+async def get_comparison(
+    run_id: str, runs: Annotated[dict[str, ComparisonRun], Depends(get_comparisons)]
+) -> ComparisonJob:
+    run = runs.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="That comparison has expired. Compare again.")
+    return _comparison_view(run)
+
+
+def _comparison_view(run: ComparisonRun) -> ComparisonJob:
+    return ComparisonJob(
+        id=run.id,
+        done=run.done,
+        total=run.total,
+        checked=run.checked,  # type: ignore[arg-type]
+        result=run.result,
+        error=run.error,
+    )
 
 
 @api.post("/stores/{store_id}/sign-out", status_code=204)

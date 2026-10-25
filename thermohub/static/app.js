@@ -120,7 +120,7 @@ const data = {
   seen: new Set(),
   selected: new Set(),
   comparison: null,
-  comparing: null,
+  comparing: null, // the comparison running on Thermohub: {id, total, checked}
   compareError: null,
   compared: [], // the shopping list items behind each comparison row
   picks: [], // per item, per shop: which candidate is chosen
@@ -261,7 +261,11 @@ function showList(root) {
   if (data.list) drawList(body);
   else fill(body, el("div", { class: "title" }, el("h1", {}, "Shopping list"), el("p", {}, "Getting your list from Cookidoo…")),
     el("div", { class: "card skeleton" }, el("div"), el("div"), el("div"), el("div")));
-  loadList().then(() => body.isConnected && drawList(body)).catch((err) => body.isConnected && listProblem(body, err));
+  // Fetch it fresh, but only redraw when it changed, so the screen doesn't jump under a finger.
+  const shown = data.list && JSON.stringify(data.list.items);
+  loadList()
+    .then(() => body.isConnected && JSON.stringify(data.list.items) !== shown && drawList(body))
+    .catch((err) => body.isConnected && listProblem(body, err));
 }
 
 function drawList(body) {
@@ -316,9 +320,16 @@ function forText(item) {
 
 function compareAction() {
   const n = data.selected.size;
-  const button = el("button", { class: "button primary wide", type: "button", disabled: n === 0, onclick: startComparison },
-    n ? `Compare prices for ${plural(n, "item")}` : "Tick items to compare");
-  showAction(button);
+  const label = n ? `Compare prices for ${plural(n, "item")}` : "Tick items to compare";
+  // Update the button in place: replacing it under a finger can lose the tap.
+  const bar = document.getElementById("action");
+  const current = !bar.hidden && bar.querySelector("button[data-action=compare]");
+  if (current) {
+    current.textContent = label;
+    current.disabled = n === 0;
+    return;
+  }
+  showAction(el("button", { class: "button primary wide", type: "button", "data-action": "compare", disabled: n === 0, onclick: startComparison }, label));
 }
 
 async function listProblem(body, err) {
@@ -420,39 +431,89 @@ function connectForm(onConnected) {
 
 // -- Price comparison --
 
-function startComparison() {
+// A comparison runs on Thermohub, which can take a minute or two for a long
+// list. The page asks how it's going every second, so leaving the page,
+// locking the phone or a reload doesn't lose it.
+const COMPARISON = "thermohub-comparison";
+const savedComparison = {
+  get() { try { return localStorage.getItem(COMPARISON); } catch { return null; } },
+  set(id) { try { localStorage.setItem(COMPARISON, id); } catch { /* storage blocked */ } },
+  clear() { try { localStorage.removeItem(COMPARISON); } catch { /* storage blocked */ } },
+};
+
+async function startComparison() {
+  if (!data.list) return go("list");
   const items = data.list.items.filter((i) => data.selected.has(i.name));
+  clearTimeout(data.compareTimer);
   data.comparison = null;
   data.compareError = null;
   data.open = new Set();
-  data.comparing = api("compare", {
-    method: "POST",
-    body: JSON.stringify({
-      items: items.map((i) => ({
-        name: i.name,
-        key: i.ingredient_ref ? `ref:${i.ingredient_ref}` : null,
-        quantities: i.quantities,
-      })),
-    }),
-  })
-    .then((comparison) => {
-      data.comparison = comparison;
-      data.compared = items;
-      data.picks = comparison.items.map(() => ({}));
-      data.qty = comparison.items.map(() => ({}));
-      data.amount = comparison.items.map((item) => item.amount);
-      data.chosen = comparison.items.map(() => new Set());
-      data.showAll = new Set();
-      data.storeFor = comparison.items.map(() => null);
-      data.plan = defaultPlan(comparison);
-    })
-    .catch((err) => (data.compareError = err))
-    .finally(() => {
-      data.comparing = null;
-      if (screenName() === "compare") render();
-    });
-  data.comparingCount = items.length;
+  data.compared = items;
+  data.comparing = { id: null, done: false, total: items.length, checked: {} };
   go("compare");
+  try {
+    data.comparing = await api("comparisons", {
+      method: "POST",
+      body: JSON.stringify({
+        items: items.map((i) => ({
+          name: i.name,
+          key: i.ingredient_ref ? `ref:${i.ingredient_ref}` : null,
+          quantities: i.quantities,
+        })),
+      }),
+    });
+    savedComparison.set(data.comparing.id);
+    followComparison(500);
+  } catch (err) {
+    data.comparing = null;
+    data.compareError = err;
+    if (screenName() === "compare") render();
+  }
+}
+
+function followComparison(wait = 1000) {
+  clearTimeout(data.compareTimer);
+  data.compareTimer = setTimeout(async () => {
+    const id = data.comparing && data.comparing.id;
+    if (!id) return;
+    let run;
+    try {
+      run = await api(`comparisons/${id}`);
+    } catch (err) {
+      if (err instanceof NeedsKey) return showKeyScreen();
+      if (err.status !== 404) return followComparison(3000); // Thermohub blinked: keep asking
+      savedComparison.clear();
+      data.comparing = null;
+      data.compareError = err;
+      if (screenName() === "compare") render();
+      return;
+    }
+    if (!data.comparing || data.comparing.id !== id) return; // a newer comparison took over
+    if (!run.done) {
+      data.comparing = run;
+      updateSplash();
+      return followComparison();
+    }
+    data.comparing = null;
+    if (run.error) data.compareError = new ApiError(run.error, 500);
+    else useComparison(run.result);
+    if (screenName() === "compare") render();
+  }, wait);
+}
+
+function useComparison(comparison) {
+  data.comparison = comparison;
+  // After a reload the shopping list may be gone from memory: match by name.
+  if (data.compared.length !== comparison.items.length) {
+    data.compared = comparison.items.map((item) => data.list && data.list.items.find((x) => x.name === item.name));
+  }
+  data.picks = comparison.items.map(() => ({}));
+  data.qty = comparison.items.map(() => ({}));
+  data.amount = comparison.items.map((item) => item.amount);
+  data.chosen = comparison.items.map(() => new Set());
+  data.showAll = new Set();
+  data.storeFor = comparison.items.map(() => null);
+  data.plan = defaultPlan(comparison);
 }
 
 // Start with the cheaper shop; if neither is cheaper, the one that has more of the items.
@@ -465,13 +526,16 @@ function defaultPlan(comparison) {
 function showCompare(root) {
   const body = el("div", { class: "stack", style: "gap: 18px" });
   root.append(header(true), body);
-  if (data.comparing) {
-    fill(body,
-      el("div", { class: "title" }, el("h1", {}, "Checking prices…"),
-        el("p", {}, `Looking up ${plural(data.comparingCount, "item")} at Woolworths and Coles. This takes a few seconds.`)),
-      el("div", { class: "card skeleton" }, el("div"), el("div"), el("div")));
-    return;
+  if (!data.comparing && !data.comparison && !data.compareError) {
+    // Opened afresh (a reload, or back from another app): pick up the last comparison.
+    const id = savedComparison.get();
+    if (!id) return go("list");
+    data.compared = [];
+    data.comparing = { id, done: false, total: 0, checked: {} };
+    followComparison(0);
+    if (!data.list) loadList().catch(() => {});
   }
+  if (data.comparing) return drawSplash(body);
   if (data.compareError) {
     if (data.compareError instanceof NeedsKey) return showKeyScreen();
     fill(body, el("div", { class: "card message" },
@@ -480,10 +544,84 @@ function showCompare(root) {
       el("div", {}, el("button", { class: "button primary small", type: "button", onclick: startComparison }, "Try again"))));
     return;
   }
-  if (!data.comparison) return go("list");
   drawComparison(body);
   // The send button needs to know which shops Thermohub is signed in to.
   loadAccounts().then(() => body.isConnected && sendAction()).catch(failed);
+}
+
+// -- The waiting screen: a magnifying glass going over both shops --
+
+const SPLASH_LINES = [
+  "Searching every size and brand",
+  "Matching products to your recipes",
+  "Working out how many to buy",
+  "Looking for multi-buy deals",
+  "Comparing like for like",
+];
+
+// Simple marks in each shop's colours, to tell them apart at a glance.
+const MARKS = {
+  woolworths: '<rect width="64" height="64" rx="16" style="fill: var(--woolworths)"/><text x="32" y="44" text-anchor="middle" font-size="34" font-weight="800" fill="#fff" style="font-family: var(--font)">W</text>',
+  coles: '<rect width="64" height="64" rx="16" style="fill: var(--coles)"/><text x="32" y="39" text-anchor="middle" font-size="17" font-weight="800" fill="#fff" letter-spacing="-0.5" style="font-family: var(--font)">Coles</text>',
+};
+const MAGNIFIER = '<circle cx="34" cy="34" r="24" stroke-width="6" style="fill: var(--glass); stroke: var(--ink)"/><path d="M22 26a14 14 0 0 1 12-8" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" opacity=".8"/><path d="M52 52l20 20" stroke-width="10" stroke-linecap="round" style="stroke: var(--ink)"/>';
+
+function svg(markup, viewBox, cls) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  node.setAttribute("viewBox", viewBox);
+  node.setAttribute("class", cls);
+  node.setAttribute("aria-hidden", "true");
+  node.innerHTML = markup; // fixed markup only
+  return node;
+}
+
+function drawSplash(body) {
+  const run = data.comparing;
+  const scene = el("div", { class: "scene", "aria-hidden": "true" },
+    STORES.map((store) => el("div", { class: `shopfront ${store.id}`, style: `--brand: var(--${store.id})` },
+      el("span", { class: "price-pop" }, "$"),
+      svg(MARKS[store.id], "0 0 64 64", "mark"),
+      el("div", { class: "shelf" }, el("i"), el("i"), el("i"), el("i")))),
+    svg(MAGNIFIER, "0 0 80 80", "magnifier"));
+  const line = el("p", { class: "splash-line" }, SPLASH_LINES[0]);
+  const bars = Object.fromEntries(STORES.map((store) => {
+    const fillBar = el("span", { class: "bar-fill", style: `--brand: var(--${store.id})` });
+    const count = el("span", { class: "bar-count" });
+    return [store.id, { row: el("div", { class: "bar-row" }, storeDot(store.id), el("span", { class: "bar-name" }, store.name), count,
+      el("span", { class: "bar" }, fillBar)), fillBar, count }];
+  }));
+  const title = el("h1", {}, "Checking prices");
+  fill(body, el("div", { class: "splash", role: "status" },
+    scene,
+    el("div", { class: "splash-text" }, title, line),
+    el("div", { class: "bars" }, STORES.map((s) => bars[s.id].row)),
+    el("p", { class: "note" }, "Long lists take a minute or two. You can leave this screen or lock your phone; Thermohub keeps going.")));
+  data.splash = { body, bars, title, total: run.total };
+  updateSplash();
+
+  let n = 0;
+  const turn = setInterval(() => {
+    if (!line.isConnected) return clearInterval(turn);
+    n = (n + 1) % SPLASH_LINES.length;
+    line.classList.remove("in");
+    void line.offsetWidth; // restart the fade
+    line.textContent = SPLASH_LINES[n];
+    line.classList.add("in");
+  }, 2600);
+}
+
+function updateSplash() {
+  const splash = data.splash;
+  const run = data.comparing;
+  if (!splash || !run || !splash.body.isConnected) return;
+  const total = run.total || 0;
+  splash.title.textContent = total ? `Checking ${plural(total, "item")}` : "Picking up where you left off";
+  for (const store of STORES) {
+    const done = Math.min((run.checked && run.checked[store.id]) || 0, total);
+    const { fillBar, count } = splash.bars[store.id];
+    fillBar.style.width = total ? `${Math.max(4, (done / total) * 100)}%` : "4%";
+    count.textContent = total ? `${done} of ${total}` : "";
+  }
 }
 
 function pick(i, storeId) {

@@ -123,6 +123,11 @@ tap targets, and no technical wording unless they open **Details**.
   at the top show whether Cookidoo, Woolworths and Coles are working; one
   turns amber when something needs a look, and tapping it opens Settings.
   On the first visit this screen asks you to connect Cookidoo instead.
+- **Checking prices:** while the shops are searched, a magnifying glass goes
+  over the two shops and a bar per shop counts the items checked. A long
+  list takes a minute or two. The comparison runs on Thermohub, so leaving
+  the screen, locking the phone or a reload doesn't lose it: the page picks
+  it up again, and shows the last comparison if it's already done.
 - **Comparison:** one answer at the top ("Coles is cheaper, save $4.40"),
   then **Where do you want to shop?**: all at Woolworths, all at Coles, or
   (when it saves at least 50c) both shops, each item wherever it's cheaper,
@@ -350,6 +355,14 @@ less.
 `totals`, `split_total` and `cheapest` summarise the picks for the
 `compared` items that every store has. A store that couldn't be searched sets
 `matches.<store>.error`.
+
+`POST /api/comparisons` takes the same body and runs the comparison in the
+background, answering `202` with `{"id", "done", "total", "checked"}`
+(`checked` counts the items searched so far at each store). `GET
+/api/comparisons/{id}` reports progress, and once `done` carries the
+comparison as `result` (or an `error`). The last 10 are kept until the
+container restarts. The page uses this; a long list can take longer than a
+phone keeps one request open.
 
 `POST /api/choices` with `{"store", "key", "product_id", "name", "quantity"}`
 remembers a product (and how many) as the pick for that ingredient at that

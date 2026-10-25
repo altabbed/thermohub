@@ -1,7 +1,7 @@
 """Price a set of shopping list items at every store and say where it's cheaper."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import re
 from typing import NamedTuple
 
@@ -51,13 +51,23 @@ async def compare(
     items: Sequence[CompareRequestItem],
     stores: Sequence[Store],
     preferences: Preferences | None = None,
+    searched: Callable[[StoreId], None] | None = None,
 ) -> Comparison:
+    """Search every store for each item and pick, count and total.
+
+    ``searched`` is called with the store's id each time a search finishes,
+    for showing progress.
+    """
+
     async def search(store: Store, item: CompareRequestItem) -> _Found:
         term = search_term(item.name)
         try:
             return _Found(term, await store.search(term))
         except StoreError as e:
             return _Found(term, [], str(e))
+        finally:
+            if searched:
+                searched(store.id)
 
     found = await asyncio.gather(*(search(store, item) for item in items for store in stores))
     compared = []
