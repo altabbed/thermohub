@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from thermohub.models import Deal, Quantity, StoreProduct, UnitPrice
@@ -221,6 +223,67 @@ def test_item_key():
         "ref:com.vorwerk.ingredients.Ingredient-1"
     )
     assert item_key("  Toilet  Paper ") == "name:toilet paper"
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "[]",
+        "null",
+        '"text"',
+        '{"coles": "text"}',
+        '{"coles": {"k": "text"}}',
+        '{"coles": {"k": {"name": "no id"}}}',
+        '{"coles": {"k": {"id": 5}}}',
+        '{"coles": {"k": {"id": ""}}}',
+    ],
+)
+def test_preferences_ignore_a_file_of_the_wrong_shape(tmp_path, contents):
+    path = tmp_path / "preferences.json"
+    path.write_text(contents)
+
+    preferences = Preferences(path)
+
+    assert preferences.usual("coles", "k") is None
+    assert preferences.usual_packs("coles", "k") is None
+    preferences.remember("coles", "k", "123", "Milk")  # and carries on from there
+    assert Preferences(path).usual("coles", "k") == "123"
+
+
+def test_preferences_keep_the_good_entries_of_a_damaged_file(tmp_path):
+    path = tmp_path / "preferences.json"
+    path.write_text(
+        json.dumps(
+            {
+                "coles": {"good": {"id": "1", "name": "Milk", "packs": 2}, "bad": {"name": "x"}},
+                "woolworths": "not a dictionary",
+            }
+        )
+    )
+
+    preferences = Preferences(path)
+
+    assert preferences.usual("coles", "good") == "1"
+    assert preferences.usual_packs("coles", "good") == 2
+    assert preferences.usual("coles", "bad") is None
+    assert preferences.usual("woolworths", "good") is None
+
+
+def test_preferences_file_with_a_byte_order_mark(tmp_path):
+    path = tmp_path / "preferences.json"
+    path.write_bytes(b"\xef\xbb\xbf" + json.dumps({"coles": {"k": {"id": "7"}}}).encode())
+
+    assert Preferences(path).usual("coles", "k") == "7"
+
+
+def test_preferences_that_cant_be_saved_are_still_remembered(tmp_path):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where the folder should be")
+    preferences = Preferences(blocker / "preferences.json")
+
+    preferences.remember("coles", "k", "123", "Milk")  # doesn't raise
+
+    assert preferences.usual("coles", "k") == "123"
 
 
 def test_preferences_survive_a_restart(tmp_path):

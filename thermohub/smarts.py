@@ -385,6 +385,25 @@ def item_key(name: str, ingredient_ref: str | None = None) -> str:
     return "name:" + " ".join(name.split()).casefold()
 
 
+def _valid_choices(raw: object) -> dict[str, dict[str, dict[str, object]]]:
+    """The entries of a preferences file that have the right shape, and nothing else.
+
+    A file that parses as JSON but isn't what was written (edited by hand, or
+    half-written) must cost the choices it spoils, not every comparison.
+    """
+    clean: dict[str, dict[str, dict[str, object]]] = {}
+    dropped = 0
+    for store, entries in (raw if isinstance(raw, dict) else {}).items():
+        for key, chosen in (entries if isinstance(entries, dict) else {}).items():
+            if isinstance(chosen, dict) and isinstance(chosen.get("id"), str) and chosen["id"]:
+                clean.setdefault(store, {})[key] = chosen
+            else:
+                dropped += 1
+    if dropped or not isinstance(raw, dict):
+        _LOGGER.warning("Ignoring parts of the preferences file that aren't in the right shape")
+    return clean
+
+
 class Preferences:
     """The product picked for each ingredient at each store, kept in the data volume."""
 
@@ -393,7 +412,7 @@ class Preferences:
         self._data: dict[str, dict[str, dict[str, object]]] = {}
         if path.exists():
             try:
-                self._data = json.loads(path.read_text(encoding="utf-8"))
+                self._data = _valid_choices(json.loads(path.read_text(encoding="utf-8-sig")))
             except (OSError, ValueError):
                 _LOGGER.warning("Ignoring unreadable preferences file %s", path)
 
@@ -413,7 +432,11 @@ class Preferences:
         if packs:
             chosen["packs"] = packs
         self._data.setdefault(store, {})[key] = chosen
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._data, indent=1), encoding="utf-8")
-        tmp.replace(self._path)
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._data, indent=1), encoding="utf-8")
+            tmp.replace(self._path)
+        except OSError:
+            # Still remembered until a restart; failing the request would help no one.
+            _LOGGER.warning("Couldn't save the preferences to %s", self._path, exc_info=True)
