@@ -146,6 +146,23 @@ class Browsers:
             self._pages_open[store_id] -= 1
             self.release(store_id)
 
+    async def counted_page(self, store_id: str) -> Page:
+        """A page for a long job (a live sign-in, filling a cart). It counts as in
+        use until it closes, so the browser isn't shut for being idle under it.
+        """
+        self._pages_open[store_id] = self._pages_open.get(store_id, 0) + 1
+        try:
+            page = await (await self.context(store_id)).new_page()
+        except BaseException:
+            self._page_gone(store_id)
+            raise
+        page.on("close", lambda _: self._page_gone(store_id))
+        return page
+
+    def _page_gone(self, store_id: str) -> None:
+        self._pages_open[store_id] -= 1
+        self.release(store_id)
+
     @asynccontextmanager
     async def search_page(self, store_id: str) -> AsyncIterator[Page]:
         """The store's page for searches: shared by the searches running at the
@@ -206,8 +223,13 @@ class Browsers:
             return  # still in use; the last page out schedules it
         loop = asyncio.get_running_loop()
         self._idle[store_id] = loop.call_later(
-            self._idle_seconds, lambda: asyncio.ensure_future(self._close_context(store_id))
+            self._idle_seconds, lambda: asyncio.ensure_future(self._close_if_idle(store_id))
         )
+
+    async def _close_if_idle(self, store_id: str) -> None:
+        self._idle.pop(store_id, None)
+        if not self._pages_open.get(store_id):  # a page may have opened since this was set
+            await self._close_context(store_id)
 
     def signed_in(self, store_id: str) -> bool:
         path = self._root / f"{store_id}.json"
@@ -442,10 +464,9 @@ class LiveSignIn:
     async def start(self, width: int, height: int, scale: float = 1.0) -> None:
         width = max(320, min(int(width), 1280))
         height = max(480, min(int(height), 1400))
-        context = await self._browsers.context(self._site.id)
-        self.page = await context.new_page()
+        self.page = await self._browsers.counted_page(self._site.id)
         await self.page.set_viewport_size({"width": width, "height": height})
-        self._cdp = await context.new_cdp_session(self.page)
+        self._cdp = await self.page.context.new_cdp_session(self.page)
         self._cdp.on("Page.screencastFrame", self._frame)
         scale = max(1.0, min(float(scale), 2.0))
         await self._cdp.send(
@@ -629,7 +650,7 @@ async def _fill_cart(
     browsers: Browsers,
     on_added: Callable[[CartOrder, CartLine], None] | None,
 ) -> None:
-    page = await (await browsers.context(order.store)).new_page()
+    page = await browsers.counted_page(order.store)
     try:
         for line in order.lines:
             line.status = "adding"

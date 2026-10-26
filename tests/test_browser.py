@@ -246,6 +246,48 @@ async def test_wrong_password_is_not_signed_in(browsers, mart):
 
 
 @pytest.mark.anyio
+async def test_the_browser_stays_open_while_a_sign_in_is_open(tmp_path, mart):
+    browsers = Browsers(tmp_path, CHROMIUM, idle_seconds=0.3)
+
+    async def send(message):
+        pass
+
+    session = LiveSignIn(browsers, mart.site(), send)
+    try:
+        await session.start(400, 700)
+        async with browsers.page("fakemart") as quick:  # a search finishing starts the idle timer
+            await quick.set_content("<p>hi</p>")
+        await asyncio.sleep(1)
+
+        assert not session.page.is_closed()
+        assert "fakemart" in browsers._contexts
+
+        await session.close()
+        await wait_for(lambda: "fakemart" not in browsers._contexts)  # idle once it's done
+    finally:
+        await browsers.close()
+
+
+@pytest.mark.anyio
+async def test_a_counted_page_keeps_the_browser_open_until_it_closes(tmp_path):
+    browsers = Browsers(tmp_path, CHROMIUM, idle_seconds=0.3)
+    try:
+        long_job = await browsers.counted_page("fakemart")
+        async with browsers.page("fakemart") as quick:
+            await quick.set_content("<p>hi</p>")
+        await asyncio.sleep(1)
+
+        assert not long_job.is_closed()
+        assert browsers._pages_open["fakemart"] == 1
+
+        await long_job.close()
+        await wait_for(lambda: "fakemart" not in browsers._contexts)
+        assert browsers._pages_open["fakemart"] == 0
+    finally:
+        await browsers.close()
+
+
+@pytest.mark.anyio
 async def test_fill_cart(browsers, mart):
     await sign_in_with_cookie(browsers, mart)
     browsers.set_signed_in("fakemart", True)
