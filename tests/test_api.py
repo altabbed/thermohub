@@ -698,6 +698,7 @@ def test_store_sign_in_websocket(live):
     ("path", "key", "message"),
     [
         ("/api/stores/coles/sign-in", "wrong", "access key"),
+        ("/api/stores/coles/sign-in", "café", "access key"),  # not ASCII: an error, not a crash
         ("/api/stores/aldi/sign-in", "s3cret", "doesn't know that store"),
     ],
 )
@@ -764,6 +765,33 @@ def test_api_key_required_when_configured():
     assert client.get("/api/shopping-list", headers={"X-API-Key": "s3cret"}).status_code == 200
     assert client.post("/api/cookidoo/sign-out").status_code == 401
     assert client.get("/health").status_code == 200
+
+
+def test_api_key_that_is_not_ascii_is_refused_not_a_crash():
+    client = make_client(api_key="s3cret")
+
+    response = client.get("/api/shopping-list", headers={"X-API-Key": "café".encode()})
+
+    assert response.status_code == 401
+
+
+def test_keys_are_compared_whatever_their_characters():
+    assert main._same_key("s3cret", "s3cret")
+    assert main._same_key("pässword", "pässword")
+    assert not main._same_key("café", "s3cret")
+    assert not main._same_key("s3cret", "café")
+    assert not main._same_key("", "s3cret")
+
+
+def test_store_sign_in_websocket_accepts_a_key_that_is_not_ascii(live):
+    client = make_client(api_key="pässword")
+
+    with client.websocket_connect("/api/stores/coles/sign-in") as ws:
+        ws.send_json({"type": "hello", "key": "pässword"})
+        assert ws.receive_bytes() == b"\xff\xd8frame"
+        ws.send_json({"type": "cancel"})
+
+    assert len(live) == 1
 
 
 def test_blank_settings_count_as_unset():

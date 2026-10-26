@@ -151,8 +151,13 @@ def require_api_key(
     key: Annotated[str | None, Security(APIKeyHeader(name="X-API-Key", auto_error=False))],
 ) -> None:
     expected = settings.api_key.get_secret_value() if settings.api_key else ""
-    if expected and not (key and secrets.compare_digest(key, expected)):
+    if expected and not (key and _same_key(key, expected)):
         raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header")
+
+
+def _same_key(given: str, expected: str) -> bool:
+    # As bytes: comparing str raises TypeError when either has a non-ASCII character.
+    return secrets.compare_digest(given.encode(), expected.encode())
 
 
 api = APIRouter(prefix="/api", dependencies=[Depends(require_api_key)])
@@ -661,7 +666,7 @@ async def store_sign_in(
         expected = settings.api_key.get_secret_value() if settings.api_key else ""
         key = str(hello.get("key") or "")
         site = sites.get(store_id)
-        if expected and not secrets.compare_digest(key, expected):
+        if expected and not _same_key(key, expected):
             await send({"type": "error", "message": "Enter Thermohub's access key first."})
         elif site is None:
             await send({"type": "error", "message": "Thermohub doesn't know that store."})
