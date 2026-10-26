@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Callable, Sequence
+import logging
 import re
 from typing import NamedTuple
 
@@ -30,6 +31,8 @@ from thermohub.smarts import (
     value_basis,
 )
 from thermohub.stores import Store, StoreError
+
+_LOGGER = logging.getLogger(__name__)
 
 # Ingredients of user-created recipes are free text such as "350 g self-raising
 # flour"; the quantity and unit would only confuse a store search.
@@ -65,6 +68,9 @@ async def compare(
             return _Found(term, await store.search(term))
         except StoreError as e:
             return _Found(term, [], str(e))
+        except Exception:  # a bug, or a page that changed: lose this store's answer, not all
+            _LOGGER.exception("Searching %s for %r failed", store.name, term)
+            return _Found(term, [], f"Something unexpected went wrong searching {store.name}.")
         finally:
             if searched:
                 searched(store.id)

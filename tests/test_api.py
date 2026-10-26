@@ -227,6 +227,22 @@ def test_status_problems():
     assert found["coles"]["detail"] == "Coles blocked the request (HTTP 403)"
 
 
+def test_status_survives_an_unexpected_error_from_a_store():
+    stores = [
+        FakeStore("woolworths", {"milk": [product("woolworths", "w-milk", 3.10)]}),
+        FakeStore("coles", {}, crash=RuntimeError("boom")),
+    ]
+    client = make_client(stores=stores)
+
+    assert client.get("/api/status").status_code == 200
+    found = connections(client)
+
+    assert found["woolworths"]["state"] == "connected"
+    assert found["coles"]["state"] == "unavailable"
+    assert found["coles"]["summary"] == "Thermohub couldn't check Coles just now."
+    assert found["coles"]["detail"] == "boom"
+
+
 def test_account():
     body = make_client(FakeCookidoo(automatic=True)).get("/api/cookidoo/account").json()
 
@@ -331,11 +347,6 @@ class SlowStore(FakeStore):
         return await super().search(term)
 
 
-class BrokenStore(FakeStore):
-    async def search(self, term):
-        raise RuntimeError("bug")
-
-
 @asynccontextmanager
 async def no_lifespan(_app):
     yield
@@ -378,14 +389,33 @@ def test_comparison_runs_in_the_background(monkeypatch):
 
 
 def test_comparison_that_fails(monkeypatch):
+    async def broken(*args, **kwargs):
+        raise RuntimeError("bug")
+
     monkeypatch.setattr(app.router, "lifespan_context", no_lifespan)
-    stores = [BrokenStore("woolworths", {}), FakeStore("coles", {})]
-    with make_client(stores=stores) as client:
+    monkeypatch.setattr(main, "compare", broken)
+    with make_client() as client:
         job = client.post("/api/comparisons", json={"items": ["milk"]}).json()
         finished = wait_for_comparison(client, job["id"])
 
     assert finished["result"] is None
     assert "Something went wrong" in finished["error"]
+
+
+def test_comparison_with_a_store_that_crashes(monkeypatch):
+    monkeypatch.setattr(app.router, "lifespan_context", no_lifespan)
+    stores = [
+        FakeStore("woolworths", {"milk": [product("woolworths", "w-milk", 3.10)]}),
+        FakeStore("coles", {}, crash=RuntimeError("bug")),
+    ]
+    with make_client(stores=stores) as client:
+        job = client.post("/api/comparisons", json={"items": ["milk"]}).json()
+        finished = wait_for_comparison(client, job["id"])
+
+    assert finished["error"] is None
+    [milk] = finished["result"]["items"]
+    assert milk["matches"]["woolworths"]["candidates"][0]["id"] == "w-milk"
+    assert milk["matches"]["coles"]["error"] == "Something unexpected went wrong searching Coles."
 
 
 def test_old_comparisons_expire():

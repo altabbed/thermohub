@@ -550,6 +550,11 @@ async def _check_store(store: Store, signed_in: bool) -> Connection:
         )
     except StoreError as e:
         return connection("unavailable", f"Thermohub can't reach {store.name} right now.", str(e))
+    except Exception as e:  # one shop's surprise mustn't take the whole status down
+        logging.getLogger(__name__).exception("Checking %s failed", store.name)
+        return connection(
+            "unavailable", f"Thermohub couldn't check {store.name} just now.", first_line(e)
+        )
     if not products:
         return connection(
             "unavailable", f"{store.name} didn't return any prices.", "A search for milk was empty"

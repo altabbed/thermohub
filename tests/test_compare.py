@@ -32,15 +32,18 @@ def items(*names):
 
 
 class FakeStore:
-    def __init__(self, store_id, catalogue, fail=None):
+    def __init__(self, store_id, catalogue, fail=None, crash=None):
         self.id = store_id
         self.name = store_id.title()
         self.catalogue = catalogue
         self.fail = fail
+        self.crash = crash  # an error that isn't a StoreError: a bug, or a changed page
         self.terms = []
 
     async def search(self, term):
         self.terms.append(term)
+        if self.crash:
+            raise self.crash
         if self.fail:
             raise StoreError(self.fail)
         return self.catalogue.get(term, [])
@@ -104,6 +107,21 @@ async def test_compare_reports_a_failed_store():
     assert onion.cheaper is None
     assert result.compared == 0
     assert result.cheapest is None
+
+
+@pytest.mark.anyio
+async def test_compare_survives_an_unexpected_error_from_one_store():
+    woolworths = FakeStore("woolworths", {"onion": [product("woolworths", "w-onion", 4.50)]})
+    coles = FakeStore("coles", {}, crash=KeyError("a field Coles stopped sending"))
+
+    result = await compare(items("onion", "garlic"), [woolworths, coles])
+
+    onion, garlic = result.items
+    assert onion.matches["woolworths"].candidates[0].id == "w-onion"
+    assert onion.matches["coles"].candidates == []
+    assert onion.matches["coles"].error == "Something unexpected went wrong searching Coles."
+    assert garlic.matches["coles"].error == onion.matches["coles"].error
+    assert result.compared == 0
 
 
 @pytest.mark.anyio
