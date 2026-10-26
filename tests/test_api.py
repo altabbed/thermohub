@@ -37,9 +37,12 @@ class FakeCookidoo:
         country_code="au", language="en-AU", url="https://cookidoo.com.au/foundation/en-AU"
     )
 
-    def __init__(self, signed_in=True, error=None, automatic=False, email="me@example.com"):
+    def __init__(
+        self, signed_in=True, error=None, automatic=False, email="me@example.com", pantry=PANTRY
+    ):
         self.signed_in = signed_in
         self.error = error
+        self.pantry = pantry
         self.can_sign_in_automatically = automatic
         self.account = Account(country="au", language="en-AU", email=email)
 
@@ -48,7 +51,7 @@ class FakeCookidoo:
             raise self.error
         if not self.signed_in and not self.can_sign_in_automatically:
             raise NotSignedIn()
-        return PANTRY
+        return self.pantry
 
     async def sign_in(self, email, password, country, language):
         if country == "zz":
@@ -176,6 +179,15 @@ def test_shopping_list_cookidoo_errors(error, status):
 
     assert response.status_code == status
     assert "Cookidoo" in response.json()["detail"]
+
+
+def test_shopping_list_cookidoo_sent_something_unreadable():
+    pantry = {"recipes": [{"id": "r1", "recipeIngredientGroups": [{"id": "no-name"}]}]}
+
+    response = make_client(FakeCookidoo(pantry=pantry)).get("/api/shopping-list")
+
+    assert response.status_code == 502
+    assert "Cookidoo may have changed it" in response.json()["detail"]
 
 
 def test_status_all_connected():

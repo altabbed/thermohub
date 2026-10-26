@@ -67,7 +67,7 @@ from thermohub.models import (
     StoreId,
     StoreProduct,
 )
-from thermohub.shopping_list import build_shopping_list
+from thermohub.shopping_list import UnreadableShoppingList, build_shopping_list
 from thermohub.smarts import Preferences
 from thermohub.stores import Coles, Store, StoreBlocked, StoreError, Woolworths
 from thermohub.stores.base import first_line
@@ -182,7 +182,14 @@ async def get_shopping_list(
         raise HTTPException(
             status_code=502, detail="Cookidoo isn't answering right now. Try again in a minute."
         ) from e
-    return build_shopping_list(pantry, cookidoo.localization, include_owned=include_owned)
+    try:
+        return build_shopping_list(pantry, cookidoo.localization, include_owned=include_owned)
+    except UnreadableShoppingList as e:
+        raise HTTPException(
+            status_code=502,
+            detail="Thermohub can't read the shopping list Cookidoo sent. "
+            "Cookidoo may have changed it.",
+        ) from e
 
 
 @api.get("/status", response_model=Status)

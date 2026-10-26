@@ -1,8 +1,9 @@
 from cookidoo_api import CookidooLocalizationConfig
+import pytest
 
 from tests.pantry_fixture import PANTRY
 from thermohub.models import Quantity
-from thermohub.shopping_list import build_shopping_list
+from thermohub.shopping_list import UnreadableShoppingList, build_shopping_list
 
 AU = CookidooLocalizationConfig(
     country_code="au", language="en-AU", url="https://cookidoo.com.au/foundation/en-AU"
@@ -95,6 +96,76 @@ def test_items_are_sorted_by_name():
     names = [item.name for item in build_shopping_list(PANTRY, AU).items]
 
     assert names == sorted(names, key=str.casefold)
+
+
+GOOD = {
+    "id": "i1",
+    "ingredientNotation": "onion",
+    "isOwned": False,
+    "quantity": {"value": 2},
+    "unitNotation": "",
+}
+
+
+def one_recipe(*entries, **recipe):
+    return {
+        "recipes": [{"id": "r1", "title": "T", "recipeIngredientGroups": list(entries), **recipe}],
+        "customerRecipes": [],
+        "additionalItems": [],
+    }
+
+
+def names(pantry):
+    return [item.name for item in build_shopping_list(pantry, AU).items]
+
+
+def test_null_lists_count_as_empty():
+    nulls = {"recipes": None, "customerRecipes": None, "additionalItems": None}
+
+    assert names(nulls) == []
+    assert names(one_recipe(recipeIngredientGroups=None)) == []
+
+
+def test_skips_entries_it_cannot_read():
+    pantry = one_recipe(
+        GOOD,
+        {"id": "no-name"},
+        {"ingredientNotation": "no id"},
+        "not even a dictionary",
+        {**GOOD, "id": "i2", "ingredientNotation": "  "},
+    )
+    pantry["additionalItems"] = [{"id": "extra"}, {"id": "extra-2", "name": "Bread"}]
+
+    assert names(pantry) == ["Bread", "onion"]
+
+
+def test_leaves_out_a_quantity_it_cannot_read():
+    odd = [
+        {**GOOD, "id": "a", "quantity": "two"},
+        {**GOOD, "id": "b", "quantity": {"value": "lots"}},
+        {**GOOD, "id": "c", "unitNotation": 5, "quantity": {"value": 1}},
+    ]
+
+    [onion] = build_shopping_list(one_recipe(*odd), AU).items
+
+    assert onion.quantities == [Quantity(amount=1, unit="5")]  # only the third could be read
+
+
+def test_a_recipe_it_cannot_summarise_is_left_out_of_the_recipes():
+    pantry = one_recipe(GOOD)
+    del pantry["recipes"][0]["id"]
+
+    shopping_list = build_shopping_list(pantry, AU)
+
+    assert [item.name for item in shopping_list.items] == ["onion"]
+    assert shopping_list.recipes == []
+
+
+def test_a_list_it_cannot_read_at_all_is_an_error_not_an_empty_list():
+    pantry = one_recipe({"id": "no-name"}, {"ingredientNotation": "no id"})
+
+    with pytest.raises(UnreadableShoppingList):
+        build_shopping_list(pantry, AU)
 
 
 def test_empty_list():

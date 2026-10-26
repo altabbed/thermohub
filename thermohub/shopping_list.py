@@ -3,12 +3,19 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import logging
 from typing import Any
 
 from cookidoo_api import CookidooLocalizationConfig
 from cookidoo_api.helpers import cookidoo_recipe_from_json
 
 from thermohub.models import ItemSource, Quantity, RecipeSummary, ShoppingItem, ShoppingList
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class UnreadableShoppingList(ValueError):
+    """Cookidoo's shopping list isn't in a form Thermohub can read: it may have changed."""
 
 
 def build_shopping_list(
@@ -24,44 +31,66 @@ def build_shopping_list(
     and ingredients of user-created recipes, which are free text). Entries
     ticked off in Cookidoo are dropped unless ``include_owned`` is set.
     """
-    recipes = [*pantry.get("recipes", []), *pantry.get("customerRecipes", [])]
+    recipes = [
+        recipe
+        for recipe in [*(pantry.get("recipes") or []), *(pantry.get("customerRecipes") or [])]
+        if isinstance(recipe, Mapping)
+    ]
     groups: dict[str, _Group] = {}
+    unreadable = 0
 
     def add(key: str, group: _Group, source: ItemSource) -> None:
         if include_owned or not source.owned:
             groups.setdefault(key, group).sources.append(source)
 
     for recipe in recipes:
-        for entry in recipe.get("recipeIngredientGroups", []):
-            name = entry["ingredientNotation"]
+        for entry in recipe.get("recipeIngredientGroups") or []:
+            name, item_id = _text(entry, "ingredientNotation"), _text(entry, "id")
+            if name is None or item_id is None:
+                unreadable += 1
+                continue
             ref = entry.get("ingredient_ref") or None
             group = _Group(name, ref, entry.get("shoppingCategory_ref") or None)
             source = ItemSource(
-                item_id=entry["id"],
+                item_id=item_id,
                 type="recipe",
-                recipe_id=recipe["id"],
-                recipe_name=recipe.get("title"),
+                recipe_id=_text(recipe, "id"),
+                recipe_name=_text(recipe, "title"),
                 quantity=_parse_quantity(entry),
                 optional=bool(entry.get("optional", False)),
                 owned=bool(entry.get("isOwned", False)),
             )
             add(f"ref:{ref}" if ref else _name_key(name), group, source)
 
-    for entry in pantry.get("additionalItems", []):
+    for entry in pantry.get("additionalItems") or []:
+        name, item_id = _text(entry, "name"), _text(entry, "id")
+        if name is None or item_id is None:
+            unreadable += 1
+            continue
         source = ItemSource(
-            item_id=entry["id"],
-            type="additional",
-            owned=bool(entry.get("isOwned", False)),
+            item_id=item_id, type="additional", owned=bool(entry.get("isOwned", False))
         )
-        add(_name_key(entry["name"]), _Group(entry["name"]), source)
+        add(_name_key(name), _Group(name), source)
+
+    if unreadable:
+        _LOGGER.warning("Skipped %d shopping list entries Thermohub can't read", unreadable)
+        if not groups:
+            # Not an empty list: that would say there is nothing to buy.
+            raise UnreadableShoppingList(f"{unreadable} entries, none readable")
 
     items = [group.merge() for group in groups.values()]
     items.sort(key=lambda item: item.name.casefold())
     return ShoppingList(
         fetched_at=datetime.now(UTC),
         items=items,
-        recipes=[_recipe_summary(recipe, localization) for recipe in recipes],
+        recipes=_recipe_summaries(recipes, localization),
     )
+
+
+def _text(entry: object, key: str) -> str | None:
+    """A non-blank string field of an entry, or None."""
+    value = entry.get(key) if isinstance(entry, Mapping) else None
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def _name_key(name: str) -> str:
@@ -70,11 +99,16 @@ def _name_key(name: str) -> str:
 
 def _parse_quantity(entry: Mapping[str, Any]) -> Quantity | None:
     quantity = entry.get("quantity") or {}
-    unit = (entry.get("unitNotation") or "").strip()
-    if quantity.get("value"):
-        return Quantity(amount=quantity["value"], unit=unit)
-    if quantity.get("from") and quantity.get("to"):
-        return Quantity(amount=quantity["from"], amount_max=quantity["to"], unit=unit)
+    if not isinstance(quantity, Mapping):
+        return None
+    unit = str(entry.get("unitNotation") or "").strip()
+    try:
+        if quantity.get("value"):
+            return Quantity(amount=quantity["value"], unit=unit)
+        if quantity.get("from") and quantity.get("to"):
+            return Quantity(amount=quantity["from"], amount_max=quantity["to"], unit=unit)
+    except ValueError:  # not numbers
+        pass
     return None
 
 
@@ -116,6 +150,18 @@ def _format_quantity(q: Quantity) -> str:
     if q.amount_max is not None:
         amount += f"-{q.amount_max:g}"
     return f"{amount} {q.unit}".strip()
+
+
+def _recipe_summaries(
+    recipes: list[Mapping[str, Any]], localization: CookidooLocalizationConfig
+) -> list[RecipeSummary]:
+    summaries = []
+    for recipe in recipes:
+        try:
+            summaries.append(_recipe_summary(recipe, localization))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            _LOGGER.warning("Left a recipe Thermohub can't read out of the summary", exc_info=True)
+    return summaries
 
 
 def _recipe_summary(
