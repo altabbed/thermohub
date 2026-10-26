@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 import re
 import time
+import unicodedata
 
 from thermohub.models import Candidate, Quantity, StoreProduct, UnitPrice
 
@@ -198,8 +199,14 @@ def _singular(word: str) -> str:
     return word
 
 
+def _plain(text: str) -> str:
+    """Lower case without accents: "Crème Fraîche" -> "creme fraiche"."""
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    return "".join(c for c in decomposed if not unicodedata.combining(c))
+
+
 def _words(text: str) -> set[str]:
-    return {_singular(w) for w in _WORD.findall(text.lower()) if w not in _STOP}
+    return {_singular(w) for w in _WORD.findall(_plain(text)) if w not in _STOP}
 
 
 # Words a product may use instead of the ingredient's own: toilet paper is

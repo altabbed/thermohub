@@ -94,6 +94,12 @@ def test_packs_needed(needs, size, packs):
         ("toilet paper", "Sorbent Toilet Paper", True),
         ("toilet paper", "Viva Paper Towel", False),
         ("toilet paper", "Harpic Toilet Cleaner", False),
+        # Accents on either side, or both.
+        ("crème fraîche", "Chobani Creme Fraiche", True),
+        ("jalapeño", "Jalapeno Slices", True),
+        ("jalapeno", "Old El Paso Jalapeño Slices", True),
+        ("crème fraîche", "Bega Crème Fraîche", True),
+        ("crème fraîche", "Bega Sour Cream", False),
     ],
 )
 def test_good_match(ingredient, name, ok):
