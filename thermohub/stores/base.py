@@ -24,6 +24,14 @@ IMPERSONATE = "chrome"
 BLOCKED_STATUSES = {401, 403, 429}
 
 
+def first_line(error: BaseException, limit: int = 200) -> str:
+    """The first non-blank line of an error's message, or the error's type when
+    it has none (Playwright's NotImplementedError on Windows, for one).
+    """
+    lines = (line.strip() for line in str(error).splitlines())
+    return next((line for line in lines if line), type(error).__name__)[:limit]
+
+
 class StoreError(Exception):
     """A search failed; the message is shown to the user."""
 
@@ -147,8 +155,9 @@ class Store:
             raise
         except Exception as e:  # the browser itself failed
             _LOGGER.warning("Searching %s in the browser failed", self.name, exc_info=True)
-            reason = str(e).splitlines()[0][:200]
-            raise StoreError(f"Couldn't search {self.name} in Thermohub's browser: {reason}") from e
+            raise StoreError(
+                f"Couldn't search {self.name} in Thermohub's browser: {first_line(e)}"
+            ) from e
 
     async def _visit(self, page: "Page", again: int | None = None) -> int:
         """Have the store's website open in ``page``: open it when it isn't, or

@@ -9,7 +9,7 @@ from tests.store_fixtures import (
     woolworths_search,
 )
 from thermohub.stores import Coles, StoreBlocked, StoreError, Woolworths
-from thermohub.stores.base import unit_price
+from thermohub.stores.base import first_line, unit_price
 from thermohub.stores.coles import _NEXT_DATA_RE, parse_results
 from thermohub.stores.woolworths import parse_search
 
@@ -341,6 +341,42 @@ async def test_unreachable_store():
     try:
         with pytest.raises(StoreError, match="Couldn't reach Woolworths"):
             await store.search("onion")
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (ValueError("first\nsecond"), "first"),
+        (ValueError("\n  \nfirst\nsecond"), "first"),
+        (NotImplementedError(), "NotImplementedError"),
+        (RuntimeError("   "), "RuntimeError"),
+        (ValueError("x" * 500), "x" * 200),
+    ],
+)
+def test_first_line_of_an_error(error, expected):
+    assert first_line(error) == expected
+
+
+class BrokenBrowsers:
+    def search_page(self, store_id):
+        raise NotImplementedError  # as Playwright fails to start on Windows: no message
+
+
+@pytest.mark.anyio
+async def test_browser_failing_without_a_message_is_a_store_error(supermarket):
+    def challenge():
+        return web.Response(
+            text='<html><script src="/_Incapsula_Resource?x=1"></script></html>',
+            content_type="text/html",
+        )
+
+    fake = await supermarket(challenge)
+    store = Coles(base_url=fake.url, browsers=BrokenBrowsers())
+    try:
+        with pytest.raises(StoreError, match="in Thermohub's browser: NotImplementedError"):
+            await store.search("milk")
     finally:
         await store.close()
 

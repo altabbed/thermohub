@@ -32,7 +32,7 @@ from thermohub.browser import (
     sign_in_state,
 )
 from thermohub.stores import Coles, Store, StoreError, Woolworths
-from thermohub.stores.base import IMPERSONATE
+from thermohub.stores.base import IMPERSONATE, first_line
 
 _FIELDS = """() => [...document.querySelectorAll('input, button')]
   .filter(e => e.offsetParent !== null)
@@ -49,11 +49,11 @@ _NET_ERROR = re.compile(r"net::(ERR_[A-Z_]+)")
 
 def _reason(e: BaseException, site_name: str) -> str:
     """The error in a sentence: a page that couldn't be reached says so plainly."""
-    text = str(e).splitlines()[0] if str(e) else type(e).__name__
+    text = first_line(e, 300)
     network = _NET_ERROR.search(text)
     if network:
         return f"Couldn't open the {site_name} website from Thermohub ({network.group(1)})"
-    return text[:300]
+    return text
 
 
 @dataclass
@@ -195,7 +195,7 @@ async def check_shop(
         async with browsers.page(site.id) as page:
             await done(await account_page(site, page))
     except Exception as e:
-        await done(Check("Start Thermohub's browser", False, str(e).splitlines()[0][:300]))
+        await done(Check("Start Thermohub's browser", False, first_line(e, 300)))
     return checks
 
 
@@ -213,7 +213,7 @@ async def _page_facts(page: Page) -> dict[str, Any]:
         facts.setdefault("blocked", None)
         facts.setdefault("fields", [])
         facts.setdefault("frames", [])
-        facts["error"] = str(e).splitlines()[0][:200]
+        facts["error"] = first_line(e)
     return facts
 
 

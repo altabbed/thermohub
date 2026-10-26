@@ -70,6 +70,7 @@ from thermohub.models import (
 from thermohub.shopping_list import build_shopping_list
 from thermohub.smarts import Preferences
 from thermohub.stores import Coles, Store, StoreBlocked, StoreError, Woolworths
+from thermohub.stores.base import first_line
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -395,7 +396,7 @@ async def start_shop_check(
             await check_shop(fresh, sites[store_id], browsers, report=report)
         except Exception as e:
             logging.getLogger(__name__).exception("Checking %s failed", store_id)
-            await report(Check("Run the checks", False, str(e).splitlines()[0][:300]))
+            await report(Check("Run the checks", False, first_line(e, 300)))
         finally:
             job.done = True
 
