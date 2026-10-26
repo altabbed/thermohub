@@ -23,7 +23,7 @@ import subprocess
 import time
 from typing import Any
 
-from playwright.async_api import BrowserContext, Page, Playwright, Route, async_playwright
+from playwright.async_api import BrowserContext, Locator, Page, Playwright, Route, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
 _LOGGER = logging.getLogger(__name__)
@@ -567,6 +567,9 @@ async def _focused_field(page: Page) -> str | None:
 
 # ---- Filling a cart ---------------------------------------------------------------
 
+# How long a product page gets to show its add button.
+ADD_WAIT_SECONDS = 20
+
 _ADD = re.compile(r"add\b.*\b(cart|trolley)|^\s*add\s*$", re.IGNORECASE)
 _MORE = re.compile(r"increase|add one|one more|increment|plus", re.IGNORECASE)
 
@@ -603,13 +606,65 @@ class CartJob:
         return all(o.state in ("done", "needs_sign_in", "failed") for o in self.orders)
 
 
+class NoAddButton(Exception):
+    """The product page has no add button of its own (it may be out of stock)."""
+
+
+# Product pages also list other products ("You may also like"), each with an add
+# button of its own. A button inside a region like that isn't this product's.
+_SUGGESTED = re.compile(
+    r"also like|you may|recommend|related|similar|customers also|bought together"
+    r"|sponsored|upsell|carousel",
+    re.IGNORECASE,
+)
+_IN_SUGGESTIONS = """(button, pattern) => {
+  const re = new RegExp(pattern, "i");
+  const says = (value) => typeof value === "string" && re.test(value);
+  for (let e = button.parentElement; e && e !== document.body; e = e.parentElement) {
+    const marks = [e.id, e.className];
+    marks.push(e.getAttribute("aria-label"), e.getAttribute("data-testid"));
+    if (marks.some(says)) return true;
+    const inside = e.querySelector(":scope > :is(h2, h3, h4, [role=heading])");
+    const before = e.previousElementSibling;
+    if (inside && says(inside.textContent)) return true;
+    if (before && before.matches("h2, h3, h4, [role=heading]") && says(before.textContent)) {
+      return true;
+    }
+  }
+  return false;
+}"""
+
+
+async def _product_add_button(page: Page) -> Locator | None:
+    """The first visible add button that isn't in a region of other products."""
+    buttons = page.get_by_role("button", name=_ADD)
+    try:
+        for k in range(min(await buttons.count(), 12)):
+            button = buttons.nth(k)
+            if await button.is_visible() and not await button.evaluate(
+                _IN_SUGGESTIONS, _SUGGESTED.pattern
+            ):
+                return button
+    except PlaywrightError:
+        pass  # the page changed under the search; look again
+    return None
+
+
+async def _wait_for_add_button(page: Page) -> Locator:
+    deadline = time.monotonic() + ADD_WAIT_SECONDS
+    while (button := await _product_add_button(page)) is None:
+        if time.monotonic() >= deadline:
+            raise NoAddButton()
+        await page.wait_for_timeout(250)
+    return button
+
+
 async def add_to_cart(page: Page, line: CartLine) -> None:
     """Open the product page and press its add button, then step up the quantity."""
     await page.goto(line.url, wait_until="domcontentloaded", timeout=45_000)
     if await looks_signed_out(page):
         raise SignedOut()
-    add = page.get_by_role("button", name=_ADD).first
-    await add.wait_for(state="visible", timeout=20_000)
+    add = await _wait_for_add_button(page)
     await add.click()
     await page.wait_for_timeout(1200)
     if await looks_signed_out(page):
@@ -660,14 +715,16 @@ async def _fill_cart(
                 browsers.set_signed_in(order.store, False)
                 _skip(order, "needs_sign_in")
                 return
+            except NoAddButton:
+                await _fail(
+                    page,
+                    line,
+                    f"Couldn't find an add button for this on the {site.name} page. "
+                    "It may be out of stock.",
+                )
             except Exception as e:
                 _LOGGER.info("Adding %s to the %s cart failed: %s", line.name, site.name, e)
-                line.status = "failed"
-                line.message = f"Couldn't find the add button on the {site.name} page."
-                try:
-                    line.screenshot = await page.screenshot(type="jpeg", quality=55)
-                except Exception:
-                    line.screenshot = None
+                await _fail(page, line, f"Couldn't find the add button on the {site.name} page.")
             else:
                 line.status = "added"
                 if on_added:
@@ -675,6 +732,16 @@ async def _fill_cart(
         order.state = "done"
     finally:
         await page.close()
+
+
+async def _fail(page: Page, line: CartLine, message: str) -> None:
+    """Mark the line failed, with a picture of what the page showed."""
+    line.status = "failed"
+    line.message = message
+    try:
+        line.screenshot = await page.screenshot(type="jpeg", quality=55)
+    except Exception:
+        line.screenshot = None
 
 
 def _skip(order: CartOrder, state: str, message: str | None = None) -> None:

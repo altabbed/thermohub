@@ -14,6 +14,7 @@ from tests.store_fixtures import (
     woolworths_product,
     woolworths_search,
 )
+from thermohub import browser as browser_module
 from thermohub.browser import (
     Browsers,
     CartJob,
@@ -42,6 +43,22 @@ PRODUCT = """<!doctype html><title>{pid}</title><h1>Product {pid}</h1>
   }});
   document.getElementById("more").onclick = post;
 </script>"""
+
+# Other products' add buttons share the page: in a region of their own.
+OUT_OF_STOCK = """<!doctype html><title>{pid}</title><h1>Product {pid}</h1><p>Out of stock</p>
+<section><h2>You may also like</h2><article><h3>Other product</h3>
+<button aria-label="Add other to cart"
+  onclick="fetch('/cart/add/other', {{method: 'POST'}})">Add</button>
+</article></section>"""
+
+SUGGESTIONS_FIRST = """<!doctype html><title>{pid}</title>
+<section class="carousel"><h2>Sponsored</h2><article><h3>Other product</h3>
+<button aria-label="Add other to cart"
+  onclick="fetch('/cart/add/other', {{method: 'POST'}})">Add</button>
+</article></section>
+<h1>Product {pid}</h1>
+<button aria-label="Add {pid} to cart"
+  onclick="fetch('/cart/add/{pid}', {{method: 'POST'}})">Add</button>"""
 
 # Like Woolworths now: the sign-in address shows the home page, and the form
 # is behind "My account", then "Log in".
@@ -131,6 +148,10 @@ class FakeMart:
         pid = request.match_info["pid"]
         if pid == "broken":
             return web.Response(text="<h1>Sold out</h1>", content_type="text/html")
+        if pid == "out-of-stock":
+            return web.Response(text=OUT_OF_STOCK.format(pid=pid), content_type="text/html")
+        if pid == "suggestions-first":
+            return web.Response(text=SUGGESTIONS_FIRST.format(pid=pid), content_type="text/html")
         return web.Response(text=PRODUCT.format(pid=pid), content_type="text/html")
 
     async def add(self, request):
@@ -288,7 +309,8 @@ async def test_a_counted_page_keeps_the_browser_open_until_it_closes(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_fill_cart(browsers, mart):
+async def test_fill_cart(browsers, mart, monkeypatch):
+    monkeypatch.setattr(browser_module, "ADD_WAIT_SECONDS", 2)  # the sold-out page has no button
     await sign_in_with_cookie(browsers, mart)
     browsers.set_signed_in("fakemart", True)
     added = []
@@ -313,6 +335,34 @@ async def test_fill_cart(browsers, mart):
     assert order.cart_url == mart.url("/cart")
     assert added == ["Onions", "Tomatoes"]
     assert job.finished
+
+
+@pytest.mark.anyio
+async def test_fill_cart_never_adds_a_suggested_product(browsers, mart, monkeypatch):
+    monkeypatch.setattr(browser_module, "ADD_WAIT_SECONDS", 1)
+    await sign_in_with_cookie(browsers, mart)
+    browsers.set_signed_in("fakemart", True)
+    added = []
+    order = CartOrder(
+        store="fakemart",
+        lines=[
+            CartLine("out-of-stock", "Chickpeas", mart.url("/product/out-of-stock")),
+            CartLine("suggestions-first", "Beans", mart.url("/product/suggestions-first")),
+        ],
+    )
+
+    await fill_carts(
+        CartJob(id="job", orders=[order]),
+        browsers,
+        {"fakemart": mart.site()},
+        lambda o, line: added.append(line.name),
+    )
+
+    # Nothing from "You may also like" or the sponsored carousel went in the cart.
+    assert mart.cart == {"suggestions-first": 1}
+    assert [line.status for line in order.lines] == ["failed", "added"]
+    assert "out of stock" in order.lines[0].message
+    assert added == ["Beans"]
 
 
 @pytest.mark.anyio
