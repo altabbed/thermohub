@@ -60,6 +60,11 @@ SUGGESTIONS_FIRST = """<!doctype html><title>{pid}</title>
 <button aria-label="Add {pid} to cart"
   onclick="fetch('/cart/add/{pid}', {{method: 'POST'}})">Add</button>"""
 
+# No way to ask for more than one.
+NO_STEPPER = """<!doctype html><title>{pid}</title><h1>Product {pid}</h1>
+<button aria-label="Add {pid} to cart"
+  onclick="fetch('/cart/add/{pid}', {{method: 'POST'}})">Add</button>"""
+
 # Like Woolworths now: the sign-in address shows the home page, and the form
 # is behind "My account", then "Log in".
 HOME = """<!doctype html><title>Fakemart</title>
@@ -152,6 +157,10 @@ class FakeMart:
             return web.Response(text=OUT_OF_STOCK.format(pid=pid), content_type="text/html")
         if pid == "suggestions-first":
             return web.Response(text=SUGGESTIONS_FIRST.format(pid=pid), content_type="text/html")
+        if pid == "no-stepper":
+            return web.Response(text=NO_STEPPER.format(pid=pid), content_type="text/html")
+        if pid == "redirects":
+            raise web.HTTPFound("/product/redirects")  # the page never loads
         return web.Response(text=PRODUCT.format(pid=pid), content_type="text/html")
 
     async def add(self, request):
@@ -363,6 +372,38 @@ async def test_fill_cart_never_adds_a_suggested_product(browsers, mart, monkeypa
     assert [line.status for line in order.lines] == ["failed", "added"]
     assert "out of stock" in order.lines[0].message
     assert added == ["Beans"]
+
+
+@pytest.mark.anyio
+async def test_fill_cart_says_what_happened_when_a_line_fails(browsers, mart, monkeypatch):
+    monkeypatch.setattr(browser_module, "QUANTITY_WAIT_SECONDS", 1)
+    await sign_in_with_cookie(browsers, mart)
+    browsers.set_signed_in("fakemart", True)
+    added = []
+    order = CartOrder(
+        store="fakemart",
+        lines=[
+            CartLine("no-stepper", "Beans", mart.url("/product/no-stepper"), 3),
+            CartLine("redirects", "Lentils", mart.url("/product/redirects"), 1),
+        ],
+    )
+
+    await fill_carts(
+        CartJob(id="job", orders=[order]),
+        browsers,
+        {"fakemart": mart.site()},
+        lambda o, line: added.append(line.name),
+    )
+
+    beans, lentils = order.lines
+    assert mart.cart == {"no-stepper": 1}  # one of the three did go in
+    assert beans.status == "failed"
+    assert beans.message == (
+        "Added 1 of 3, then couldn't add more. Check your Fakemart cart before trying again."
+    )
+    assert lentils.status == "failed"
+    assert lentils.message == "Couldn't add this from the Fakemart page."
+    assert added == []  # neither becomes the remembered product
 
 
 @pytest.mark.anyio

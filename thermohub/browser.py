@@ -567,8 +567,9 @@ async def _focused_field(page: Page) -> str | None:
 
 # ---- Filling a cart ---------------------------------------------------------------
 
-# How long a product page gets to show its add button.
+# How long a product page gets to show its add button, and its quantity button.
 ADD_WAIT_SECONDS = 20
+QUANTITY_WAIT_SECONDS = 10
 
 _ADD = re.compile(r"add\b.*\b(cart|trolley)|^\s*add\s*$", re.IGNORECASE)
 _MORE = re.compile(r"increase|add one|one more|increment|plus", re.IGNORECASE)
@@ -608,6 +609,15 @@ class CartJob:
 
 class NoAddButton(Exception):
     """The product page has no add button of its own (it may be out of stock)."""
+
+
+class PartlyAdded(Exception):
+    """Some of the quantity is in the cart, but the page wouldn't take the rest."""
+
+    def __init__(self, added: int, wanted: int) -> None:
+        super().__init__(f"added {added} of {wanted}")
+        self.added = added
+        self.wanted = wanted
 
 
 # Product pages also list other products ("You may also like"), each with an add
@@ -669,9 +679,12 @@ async def add_to_cart(page: Page, line: CartLine) -> None:
     await page.wait_for_timeout(1200)
     if await looks_signed_out(page):
         raise SignedOut()
-    for _ in range(line.quantity - 1):
+    for added in range(1, line.quantity):
         more = page.get_by_role("button", name=_MORE).first
-        await more.click(timeout=10_000)
+        try:
+            await more.click(timeout=QUANTITY_WAIT_SECONDS * 1000)
+        except PlaywrightError as e:
+            raise PartlyAdded(added, line.quantity) from e
         await page.wait_for_timeout(700)
 
 
@@ -722,9 +735,16 @@ async def _fill_cart(
                     f"Couldn't find an add button for this on the {site.name} page. "
                     "It may be out of stock.",
                 )
+            except PartlyAdded as e:
+                await _fail(
+                    page,
+                    line,
+                    f"Added {e.added} of {e.wanted}, then couldn't add more. "
+                    f"Check your {site.name} cart before trying again.",
+                )
             except Exception as e:
                 _LOGGER.info("Adding %s to the %s cart failed: %s", line.name, site.name, e)
-                await _fail(page, line, f"Couldn't find the add button on the {site.name} page.")
+                await _fail(page, line, f"Couldn't add this from the {site.name} page.")
             else:
                 line.status = "added"
                 if on_added:
