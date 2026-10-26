@@ -58,6 +58,24 @@ def test_need_adds_up_known_units():
         ("approx 170g", "Coles Bananas", {"count": 1, "mass": 170}),
         ("each", "Brown Onion approx. 150g", {"count": 1, "mass": 150}),
         ("approximately 1.2kg", "Butternut Pumpkin", {"count": 1, "mass": 1200}),
+        # Woolworths writes a multipack as the size of one, then how many.
+        ("375mL x 30 pack", "Coca-Cola Classic Cans", {"mass": 11250, "count": 30}),
+        ("300mL x 12 pack", "Coca-Cola Mini Bottles", {"mass": 3600, "count": 12}),
+        (None, "La Ice Cola Cans 375mL x 12 pack", {"mass": 4500, "count": 12}),
+        ("2.5kg x 2", "Rice", {"mass": 5000, "count": 2}),
+        ("1,000g", "Plain Flour", {"mass": 1000}),
+        ("1,250mL", "Stock", {"mass": 1250}),
+        ("12 packs", "Free Range Eggs", {"count": 12}),
+        # Coles: the size is only how many, and the name has the size of one.
+        (
+            "10 Pack",
+            "Pepsi Max Soft Drink No Sugar Cans Multipack 375ml",
+            {"mass": 3750, "count": 10},
+        ),
+        ("24 Pack", "Carlton Dry Bottle 330ml", {"mass": 7920, "count": 24}),
+        # But when the size has the weight, it's the weight of them all.
+        ("700g", "Sunny Queen 12 Pack Extra Large Free Range Eggs", {"mass": 700, "count": 12}),
+        ("880g", "SPC Canned Regular 4 Pack", {"mass": 880, "count": 4}),
     ],
 )
 def test_holds(size, name, expected):
@@ -76,6 +94,8 @@ def test_holds(size, name, expected):
         ({"pack": 2}, "4 x 400g", 1),
         ({}, "1kg", 1),
         ({"mass": 100_000}, "100g", 24),
+        ({"mass": 1000}, "375mL x 6 pack", 1),  # 2.25 L in the pack, not 375 mL
+        ({"mass": 5000}, "375mL x 6 pack", 3),
     ],
 )
 def test_packs_needed(needs, size, packs):

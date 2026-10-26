@@ -71,13 +71,22 @@ def need(quantities: Sequence[Quantity]) -> dict[str, float]:
 
 # ---- How much a product holds ------------------------------------------------------
 
-_MULTI = re.compile(r"(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(kg|g|ml|l)\b", re.IGNORECASE)
-_SINGLE = re.compile(r"(\d+(?:\.\d+)?)\s*(kg|g|ml|l)\b", re.IGNORECASE)
-_COUNT = re.compile(r"(\d+)\s*(?:pack|pk|pieces|piece|ea|each|count|ct)\b", re.IGNORECASE)
+# A number, with thousands separators allowed: "1,000".
+_NUM = r"(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
+# "4 x 400g" (how many, then the size of each) and "375mL x 30 pack" (the other way round).
+_MULTI = re.compile(rf"(\d+)\s*x\s*{_NUM}\s*(kg|g|ml|l)\b", re.IGNORECASE)
+_MULTI_AFTER = re.compile(rf"{_NUM}\s*(kg|g|ml|l)\s*x\s*(\d+)\b", re.IGNORECASE)
+_SINGLE = re.compile(rf"{_NUM}\s*(kg|g|ml|l)\b", re.IGNORECASE)
+_COUNT = re.compile(r"(\d+)\s*(?:packs?|pks?|pieces?|ea|each|count|ct)\b", re.IGNORECASE)
+_PACKS_ONLY = re.compile(r"\s*(\d+)\s*(?:packs?|pks?)\s*$", re.IGNORECASE)
 _SCALE = {"kg": 1000, "g": 1, "l": 1000, "ml": 1}
 # Loose fruit and veg are sold one at a time with a rough weight:
 # "Coles Bananas | approx 170g" is one banana.
 _APPROX = re.compile(r"\bapprox(?:\.|imately)?(?=\W|$)", re.IGNORECASE)
+
+
+def _number(text: str) -> float:
+    return float(text.replace(",", ""))
 
 
 def holds(product: StoreProduct) -> dict[str, float]:
@@ -86,18 +95,30 @@ def holds(product: StoreProduct) -> dict[str, float]:
     if _APPROX.search(size) or _APPROX.search(product.name):
         single = _SINGLE.search(size) or _SINGLE.search(product.name)
         if single:
-            return {COUNT: 1, MASS: float(single.group(1)) * _SCALE[single.group(2).lower()]}
+            return {COUNT: 1, MASS: _number(single.group(1)) * _SCALE[single.group(2).lower()]}
         return {COUNT: 1}
     amount: dict[str, float] = {}
-    multi = _MULTI.search(size) or _MULTI.search(product.name)
     single = _SINGLE.search(size) or _SINGLE.search(product.name)
     count = _COUNT.search(size) or _COUNT.search(product.name)
+    if found := _MULTI.search(size) or _MULTI.search(product.name):
+        multi: tuple[int, float, str] | None = (
+            int(found.group(1)),
+            _number(found.group(2)),
+            found.group(3),
+        )
+    elif found := _MULTI_AFTER.search(size) or _MULTI_AFTER.search(product.name):
+        multi = int(found.group(3)), _number(found.group(1)), found.group(2)
+    else:
+        multi = None
     if multi:
-        n, q, unit = int(multi.group(1)), float(multi.group(2)), multi.group(3).lower()
-        amount[MASS] = n * q * _SCALE[unit]
+        n, each, unit = multi
+        amount[MASS] = n * each * _SCALE[unit.lower()]
         amount[COUNT] = n
     elif single:
-        amount[MASS] = float(single.group(1)) * _SCALE[single.group(2).lower()]
+        amount[MASS] = _number(single.group(1)) * _SCALE[single.group(2).lower()]
+        if packs := _PACKS_ONLY.match(size):
+            # The size says only how many ("10 Pack"), so the name's "375ml" is one of them.
+            amount[MASS] *= int(packs.group(1))
     if count:
         amount[COUNT] = int(count.group(1))
     elif "each" in size.lower() and COUNT not in amount:
