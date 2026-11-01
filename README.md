@@ -157,10 +157,11 @@ tap targets, and no technical wording unless they open **Details**.
   then offers **Open my Coles cart**. Anything that couldn't be added gets a
   link to add it yourself and a picture of what Thermohub saw.
 - **Shop sign-in:** the real Woolworths or Coles website, running in
-  Thermohub's own browser and shown on your screen. Tap the boxes on the
-  page and type in the box underneath (it turns into a password box for
-  passwords, and offers texted codes on phones). Press **I've signed in**
-  when your account page appears.
+  Thermohub's own browser and shown on your screen. Tap a box on the page
+  and the keyboard comes up for Thermohub's own box (above the picture on a
+  phone, under it on a computer), which passes what you type on to the page.
+  It turns into a password box for passwords, and offers texted codes on
+  phones. Press **I've signed in** when your account page appears.
 - **Settings:** your Cookidoo account (connect or sign out), and for each
   shop whether Thermohub is signed in (sign in or out) and whether prices
   are working, with **Check again**. Under **Something not working?**,

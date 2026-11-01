@@ -1381,17 +1381,22 @@ function showSignIn(root, storeId) {
   root.append(
     header({ href: `#${back}`, label: "Back" }),
     el("div", { class: "title" }, el("h1", {}, `Sign in to ${store.name}`),
-      el("p", {}, `This is the ${store.name} website, running on your Thermohub. Sign in as usual. If ${store.name} sends you a code, type that in too.`)),
+      el("p", {}, `Sign in as usual. If ${store.name} sends you a code, type it in too.`)),
     el("div", { class: "live" },
       el("div", { class: "live-address" }, icon("lock"), address),
       screen,
       el("div", { class: "typing" }, typing),
       tools,
-      el("p", { class: "note" }, `Thermohub stays signed in so it can fill your cart, like a browser does. You can sign out in Settings.`)));
+      el("p", { class: "note" }, `This is the ${store.name} website, running on your Thermohub. It stays signed in so it can fill your cart, like a browser does. You can sign out in Settings.`)));
 
-  // The page in Thermohub's browser is the size of the box on this screen.
-  const width = clamp(Math.round(screen.getBoundingClientRect().width), 320, 1280);
-  const height = clamp(Math.round(window.innerHeight - 300), 480, Math.min(1400, Math.round(width * 1.9)));
+  // The page in Thermohub's browser is the size of the box on this screen: as tall as
+  // the room left on the screen, less what sits under it (the buttons, and on a computer
+  // the text box).
+  const touch = !matchMedia("(pointer: fine)").matches;
+  const box = screen.getBoundingClientRect();
+  const width = clamp(Math.round(box.width), 320, 1280);
+  const room = window.innerHeight - (box.top + window.scrollY) - (touch ? 110 : 190);
+  const height = clamp(Math.round(room), 360, Math.min(1400, Math.round(width * 1.9)));
   screen.style.aspectRatio = `${width} / ${height}`;
 
   const base = location.pathname.replace(/[^/]*$/, "");
@@ -1424,6 +1429,8 @@ function showSignIn(root, storeId) {
         const url = new URL(message.url);
         address.textContent = url.host.replace(/^www\./, "") + (url.pathname === "/" ? "" : url.pathname);
       } catch { /* not a web address */ }
+    } else if (message.type === "fields") {
+      fields = message.fields || [];
     } else if (message.type === "editable") {
       fieldFocused(message.value ? message.field || "text" : null);
     } else if (message.type === "error") {
@@ -1470,9 +1477,27 @@ function showSignIn(root, storeId) {
       lastY = event.clientY;
     }
   });
+  // A phone raises its keyboard only for a box focused inside the tap itself, and the shop
+  // page answers a moment too late for that. So the page says where its boxes are, and a
+  // tap on one takes the cursor here at once. That happens on the click that ends the tap,
+  // not on the pointer going up: right after that the phone sends its own mouse events, and
+  // pressing on something that can't take the cursor would take the cursor away again.
+  let tappedBox = null;
   screen.addEventListener("pointerup", (event) => {
-    if (start && !scrolling && !finished) send({ type: "tap", ...toPage(event) });
+    tappedBox = null;
+    if (start && !scrolling && !finished) {
+      const at = toPage(event);
+      const slop = 6;
+      tappedBox = fields.find((f) => at.x >= f.x - slop && at.x <= f.x + f.w + slop
+        && at.y >= f.y - slop && at.y <= f.y + f.h + slop) || null;
+      if (!tappedBox && touch) typing.blur(); // tapped away from the boxes: put the keyboard away
+      send({ type: "tap", ...at });
+    }
     start = null;
+  });
+  screen.addEventListener("click", () => {
+    if (tappedBox) fieldFocused(tappedBox.field, true);
+    tappedBox = null;
   });
   screen.addEventListener("pointercancel", () => (start = null));
   screen.addEventListener("wheel", (event) => {
@@ -1482,16 +1507,27 @@ function showSignIn(root, storeId) {
 
   // Typing happens in the box under the picture and is copied to the page as it changes.
   let sent = "";
-  const fieldFocused = (field) => {
+  let fields = []; // where the shop page's text boxes are, as the server last said
+  let armed = null; // the kind of box a tap has just set up here, until the shop confirms it
+  const fieldFocused = (field, fromTap = false) => {
+    if (!fromTap && field && armed === field) {
+      armed = null; // the tap already did this; don't clear what's been typed since
+      if (document.activeElement !== typing) typing.focus({ preventScroll: true });
+      return;
+    }
+    armed = fromTap ? field : null;
     typing.value = "";
     sent = "";
     const kind = SIGN_IN_FIELD[field] || null;
-    typing.type = kind ? kind.type : "text";
+    // Changing the type of a box that has the cursor can make a phone drop its keyboard.
+    const type = kind ? kind.type : "text";
+    if (typing.type !== type) typing.type = type;
     typing.placeholder = kind ? kind.placeholder : "Tap a box on the page first";
     typing.autocomplete = kind ? kind.autocomplete : "off";
     typing.inputMode = (kind && kind.inputMode) || "";
     typing.parentElement.classList.toggle("ready", Boolean(kind));
-    if (kind && matchMedia("(pointer: fine)").matches) typing.focus({ preventScroll: true });
+    if (kind) typing.focus({ preventScroll: true });
+    else if (touch) typing.blur();
   };
   typing.addEventListener("input", () => {
     const now = typing.value;

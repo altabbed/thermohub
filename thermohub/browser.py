@@ -431,12 +431,9 @@ async def sign_in_state(page: Page) -> bool | None:
 
 # ---- Live sign-in ------------------------------------------------------------------
 
-# What kind of box has the keyboard focus: "password", "code", "email", "tel",
-# "number" or "text"; "frame" when it's inside an embedded page; null for none.
-_FOCUSED_FIELD = """() => {
-  const e = document.activeElement;
-  if (!e) return null;
-  if (e.tagName === "IFRAME") return "frame";
+# What kind of text box an element is: "password", "code", "email", "tel", "number"
+# or "text"; null when it isn't one.
+_FIELD_KIND = """(e) => {
   if (e.isContentEditable || e.tagName === "TEXTAREA") return "text";
   if (e.tagName !== "INPUT") return null;
   const notText = ["button", "submit", "checkbox", "radio", "hidden", "image", "reset", "file"];
@@ -446,7 +443,38 @@ _FOCUSED_FIELD = """() => {
   if (["email", "tel", "number"].includes(e.type)) return e.type;
   return e.inputMode === "numeric" ? "number" : "text";
 }"""
+# What kind of box has the keyboard focus; "frame" when it's inside an embedded page.
+_FOCUSED_FIELD = (
+    "() => { const kind = "
+    + _FIELD_KIND
+    + """;
+  const e = document.activeElement;
+  if (!e) return null;
+  if (e.tagName === "IFRAME") return "frame";
+  return kind(e);
+}"""
+)
+# Where the page's text boxes are, in its own pixels, and what kind each is.
+_FIELD_BOXES = (
+    "() => { const kind = "
+    + _FIELD_KIND
+    + """;
+  const boxes = [];
+  for (const e of document.querySelectorAll("input, textarea, [contenteditable]")) {
+    const field = kind(e);
+    if (!field || e.disabled || e.readOnly) continue;
+    const style = getComputedStyle(e), r = e.getBoundingClientRect();
+    if (style.visibility === "hidden" || style.display === "none") continue;
+    if (r.width < 8 || r.height < 8) continue;
+    boxes.push({x: Math.round(r.x), y: Math.round(r.y),
+                w: Math.round(r.width), h: Math.round(r.height), field});
+  }
+  return boxes;
+}"""
+)
 _KEYS = {"Backspace", "Enter", "Tab", "Escape", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"}
+# How often the person's screen is told where the text boxes are, when they've moved.
+_FIELD_BOXES_EVERY = 0.6
 
 Send = Callable[[bytes | dict[str, Any]], Awaitable[None]]
 
@@ -460,10 +488,12 @@ class LiveSignIn:
         self._send = send
         self.page: Page | None = None
         self._cdp: Any = None
+        self._boxes: list[dict[str, Any]] | None = None  # as last sent
+        self._watching: asyncio.Task[None] | None = None
 
     async def start(self, width: int, height: int, scale: float = 1.0) -> None:
         width = max(320, min(int(width), 1280))
-        height = max(480, min(int(height), 1400))
+        height = max(360, min(int(height), 1400))
         self.page = await self._browsers.counted_page(self._site.id)
         await self.page.set_viewport_size({"width": width, "height": height})
         self._cdp = await self.page.context.new_cdp_session(self.page)
@@ -479,6 +509,7 @@ class LiveSignIn:
             },
         )
         self.page.on("framenavigated", self._navigated)
+        self._watching = asyncio.ensure_future(self._watch_text_boxes())
         await self._open_sign_in()
 
     async def _open_sign_in(self) -> None:
@@ -502,12 +533,31 @@ class LiveSignIn:
         if self.page is not None and frame == self.page.main_frame:
             asyncio.ensure_future(self._send({"type": "address", "url": frame.url}))
 
+    async def _watch_text_boxes(self) -> None:
+        """Keep the person's screen told where the page's text boxes are. A phone only
+        raises its keyboard for a box focused inside the tap itself, so the screen has
+        to know which taps land on a box before the page has answered.
+        """
+        while self.page is not None and not self.page.is_closed():
+            await self.send_text_boxes()
+            await asyncio.sleep(_FIELD_BOXES_EVERY)
+
+    async def send_text_boxes(self) -> None:
+        page = self.page
+        if page is None or page.is_closed():
+            return
+        boxes = await _text_boxes(page)
+        if boxes != self._boxes:
+            self._boxes = boxes
+            await self._send({"type": "fields", "fields": boxes})
+
     async def tap(self, x: float, y: float) -> None:
         page = self._require_page()
         await page.mouse.click(x, y)
         await page.wait_for_timeout(150)
         field = await _focused_field(page)
         await self._send({"type": "editable", "value": field is not None, "field": field})
+        await self.send_text_boxes()
 
     async def type_text(self, text: str) -> None:
         await self._require_page().keyboard.insert_text(text[:500])
@@ -540,6 +590,9 @@ class LiveSignIn:
         return signed_in
 
     async def close(self) -> None:
+        if self._watching is not None:
+            self._watching.cancel()
+            self._watching = None
         if self.page is not None and not self.page.is_closed():
             await self.page.close()
         self.page = None
@@ -549,6 +602,26 @@ class LiveSignIn:
         if self.page is None:
             raise RuntimeError("Sign-in has not started")
         return self.page
+
+
+async def _text_boxes(page: Page) -> list[dict[str, Any]]:
+    """The page's text boxes, in the page's pixels, those in embedded pages included."""
+    try:
+        boxes: list[dict[str, Any]] = await page.evaluate(_FIELD_BOXES)
+        for frame in page.frames[1:]:
+            try:
+                owner = await (await frame.frame_element()).bounding_box()
+                if owner is None:
+                    continue  # not showing
+                for box in await frame.evaluate(_FIELD_BOXES):
+                    box["x"] += round(owner["x"])
+                    box["y"] += round(owner["y"])
+                    boxes.append(box)
+            except Exception:  # a page that went away while looking
+                continue
+        return boxes
+    except Exception:  # the page is changing under the look
+        return []
 
 
 async def _focused_field(page: Page) -> str | None:

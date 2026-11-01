@@ -93,10 +93,18 @@ LOGIN = """<!doctype html><title>Sign in</title>
 </form>"""
 
 
+# The sign-in form inside an embedded page, as some shops do it.
+FRAMED_LOGIN = """<!doctype html><title>Sign in</title>
+<h1>Welcome</h1>
+<iframe src="/login" style="margin: 30px; border: 0; width: 340px; height: 200px"></iframe>"""
+
+
 class FakeMart:
     def __init__(self):
         self.cart = {}
+        self.logins = []  # what each sign-in form sent
         app = web.Application()
+        app.router.add_get("/framed", self.framed_login)
         app.router.add_get("/login", self.login_page)
         app.router.add_get("/home", self.home)
         app.router.add_post("/login", self.login)
@@ -125,8 +133,12 @@ class FakeMart:
     async def login_page(self, request):
         return web.Response(text=LOGIN, content_type="text/html")
 
+    async def framed_login(self, request):
+        return web.Response(text=FRAMED_LOGIN, content_type="text/html")
+
     async def login(self, request):
         form = await request.post()
+        self.logins.append(dict(form))
         if form.get("password") != "pw":
             return web.Response(text=LOGIN, content_type="text/html")
         response = web.HTTPFound("/account")
@@ -234,6 +246,89 @@ async def test_live_sign_in(browsers, mart):
     assert any(
         m == {"type": "address", "url": mart.url("/account")} for m in sent if isinstance(m, dict)
     )
+
+
+def last_boxes(sent):
+    """The most recent word on where the page's text boxes are."""
+    return next(
+        (m["fields"] for m in reversed(sent) if isinstance(m, dict) and m["type"] == "fields"),
+        None,
+    )
+
+
+@pytest.mark.anyio
+async def test_live_sign_in_says_where_the_text_boxes_are(browsers, mart):
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    session = LiveSignIn(browsers, mart.site(), send)
+    try:
+        await session.start(400, 700)
+        await wait_for(lambda: last_boxes(sent))
+        boxes = last_boxes(sent)
+    finally:
+        await session.close()
+
+    # The fake shop's form: an email box, then a password box under it, inside the 8px margin.
+    [email, password] = boxes
+    assert (email["x"], email["y"], email["field"]) == (8, 8, "email")
+    assert (password["x"], password["field"]) == (8, "password")
+    assert password["y"] == email["y"] + email["h"]
+    assert email["w"] >= 300 and email["h"] >= 40
+
+
+@pytest.mark.anyio
+async def test_text_boxes_in_an_embedded_page_are_found_where_they_show(browsers, mart):
+    from dataclasses import replace
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    session = LiveSignIn(browsers, replace(mart.site(), sign_in_url=mart.url("/framed")), send)
+    try:
+        await session.start(400, 700)
+        await wait_for(lambda: last_boxes(sent))
+        [email, password] = last_boxes(sent)
+        frame = await session.page.locator("iframe").bounding_box()
+
+        # Tapping the box in the embedded page is understood as a tap on an email box.
+        await session.tap(email["x"] + 20, email["y"] + 20)
+    finally:
+        await session.close()
+
+    # Where the embedded page sits on the page, plus the form's own 8px inside it.
+    assert abs(email["x"] - (frame["x"] + 8)) <= 1 and abs(email["y"] - (frame["y"] + 8)) <= 1
+    assert (email["field"], password["field"]) == ("email", "password")
+    assert abs(password["y"] - (email["y"] + email["h"])) <= 1
+    assert {"type": "editable", "value": True, "field": "email"} in sent
+
+
+@pytest.mark.anyio
+async def test_text_boxes_are_told_again_when_the_page_changes(browsers, mart):
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    session = LiveSignIn(browsers, mart.site(), send)
+    try:
+        await session.start(400, 700)
+        await wait_for(lambda: last_boxes(sent))
+        first = last_boxes(sent)[0]["y"]
+        before = len([m for m in sent if isinstance(m, dict) and m["type"] == "fields"])
+        await session.page.evaluate("() => { document.body.style.marginTop = '100px'; }")
+        await wait_for(lambda: last_boxes(sent)[0]["y"] != first)
+        await asyncio.sleep(1.5)  # a few more looks, with nothing moved
+        after = len([m for m in sent if isinstance(m, dict) and m["type"] == "fields"])
+    finally:
+        await session.close()
+
+    assert last_boxes(sent)[0]["y"] == 100
+    assert after == before + 1  # told once about the move, not on every look
 
 
 @pytest.mark.anyio
