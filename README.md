@@ -196,6 +196,13 @@ why failed items come back with a screenshot. If the shop asks to sign in
 again, the progress screen says so and offers to sign in and retry.
 **Sign out** in Settings deletes the shop's browser profile.
 
+Each shop's browser does one thing at a time, a sign-in or a cart. A cart sent
+while the browser is busy waits its turn, and its card says what for. A
+sign-in screen nobody has tapped for five minutes closes itself, so one left
+open in a tab can't keep a cart waiting. Each item gets 90 seconds before
+Thermohub moves on to the next, and **Stop** on the progress screen ends the
+job (what is already in the cart stays there).
+
 The live sign-in only accepts connections from Thermohub's own page (so
 another website open in your browser can't watch or drive it). Behind a
 reverse proxy, pass the original `Host` header through and allow WebSocket
@@ -399,7 +406,9 @@ remembered the same way.
   after a tap (`field` is `password`, `code`, `email`, `tel`, `number` or
   `text`), `{"type": "result", "signed_in"}` and `{"type": "error",
   "message"}`. The page sends `tap` (`x`, `y`), `text`, `key`, `scroll`
-  (`dy`), `back`, `restart`, `done` or `cancel`.
+  (`dy`), `back`, `restart`, `done` or `cancel`. Five minutes without a
+  message from the page ends the sign-in with an `error`. While one is open,
+  another for the same shop is refused as busy.
 - `GET /api/stores/{store}/search?q=…`: the products Thermohub reads from
   the shop's search for those words, in the shop's order.
 - `POST /api/stores/{store}/checks`: starts the shop checks and answers
@@ -413,7 +422,10 @@ remembered the same way.
 - `GET /api/carts/{id}`: the job's progress. Each order has a `state`
   (`waiting`, `running`, `done`, `needs_sign_in`, `failed`) and each line a
   `status` (`waiting`, `adding`, `added`, `failed`, `skipped`), with a
-  `screenshot` data URL for failed lines.
+  `screenshot` data URL for failed lines. A `waiting` order has a `message`
+  saying what it waits for.
+- `POST /api/carts/{id}/stop`: stops the job and answers with it. Orders not
+  yet done become `failed` ("You stopped this."), their lines `skipped`.
 
 ### `GET /health`
 

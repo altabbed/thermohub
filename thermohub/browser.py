@@ -84,6 +84,7 @@ class Browsers:
         self._contexts: dict[str, BrowserContext] = {}
         self._start_lock = asyncio.Lock()
         self._locks: dict[str, asyncio.Lock] = {}
+        self._doing: dict[str, str] = {}
         self._idle: dict[str, asyncio.TimerHandle] = {}
         self._pages_open: dict[str, int] = {}
         self._search_pages: dict[str, Page] = {}
@@ -94,6 +95,20 @@ class Browsers:
     def lock(self, store_id: str) -> asyncio.Lock:
         """Held while signing in or filling a cart, so the two never share a page."""
         return self._locks.setdefault(store_id, asyncio.Lock())
+
+    @asynccontextmanager
+    async def busy(self, store_id: str, doing: str) -> AsyncIterator[None]:
+        """Hold the store's browser for a "sign-in", a "cart" or a "sign-out", and say which."""
+        async with self.lock(store_id):
+            self._doing[store_id] = doing
+            try:
+                yield
+            finally:
+                self._doing.pop(store_id, None)
+
+    def doing(self, store_id: str) -> str | None:
+        """What holds the store's browser right now, or None when it is free."""
+        return self._doing.get(store_id) if self.lock(store_id).locked() else None
 
     async def context(self, store_id: str) -> BrowserContext:
         self._cancel_idle(store_id)
@@ -246,7 +261,7 @@ class Browsers:
 
     async def sign_out(self, store_id: str) -> None:
         """Forget the store's sign-in by throwing its browser profile away."""
-        async with self.lock(store_id):
+        async with self.busy(store_id, "sign-out"):
             await self._close_context(store_id)
             shutil.rmtree(self._root / store_id, ignore_errors=True)
             self.set_signed_in(store_id, False)
@@ -643,6 +658,8 @@ async def _focused_field(page: Page) -> str | None:
 # How long a product page gets to show its add button, and its quantity button.
 ADD_WAIT_SECONDS = 20
 QUANTITY_WAIT_SECONDS = 10
+# How long one item gets in all, whatever the page is doing, before Thermohub moves on.
+LINE_SECONDS = 90
 
 _ADD = re.compile(r"add\b.*\b(cart|trolley)|^\s*add\s*$", re.IGNORECASE)
 _MORE = re.compile(r"increase|add one|one more|increment|plus", re.IGNORECASE)
@@ -674,10 +691,19 @@ class CartJob:
     id: str
     orders: list[CartOrder]
     started: float = field(default_factory=time.time)
+    task: asyncio.Task[None] | None = field(default=None, repr=False)
 
     @property
     def finished(self) -> bool:
         return all(o.state in ("done", "needs_sign_in", "failed") for o in self.orders)
+
+    def stop(self) -> None:
+        """Stop adding. What is already in the carts stays there."""
+        for order in self.orders:
+            if order.state in ("waiting", "running"):
+                _skip(order, "failed", "You stopped this.")
+        if self.task is not None:
+            self.task.cancel()
 
 
 class NoAddButton(Exception):
@@ -774,7 +800,7 @@ async def fill_carts(
         if not browsers.signed_in(order.store):
             _skip(order, "needs_sign_in")
             continue
-        async with browsers.lock(order.store):
+        async with browsers.busy(order.store, "cart"):
             order.state = "running"
             try:
                 await _fill_cart(order, site, browsers, on_added)
@@ -796,7 +822,8 @@ async def _fill_cart(
         for line in order.lines:
             line.status = "adding"
             try:
-                await add_to_cart(page, line)
+                async with asyncio.timeout(LINE_SECONDS):
+                    await add_to_cart(page, line)
             except SignedOut:
                 browsers.set_signed_in(order.store, False)
                 _skip(order, "needs_sign_in")
@@ -815,6 +842,13 @@ async def _fill_cart(
                     f"Added {e.added} of {e.wanted}, then couldn't add more. "
                     f"Check your {site.name} cart before trying again.",
                 )
+            except TimeoutError:
+                await _fail(
+                    page,
+                    line,
+                    f"{site.name} took too long on this one, so Thermohub moved on. "
+                    f"Check your {site.name} cart in case it went in.",
+                )
             except Exception as e:
                 _LOGGER.info("Adding %s to the %s cart failed: %s", line.name, site.name, e)
                 await _fail(page, line, f"Couldn't add this from the {site.name} page.")
@@ -832,7 +866,7 @@ async def _fail(page: Page, line: CartLine, message: str) -> None:
     line.status = "failed"
     line.message = message
     try:
-        line.screenshot = await page.screenshot(type="jpeg", quality=55)
+        line.screenshot = await page.screenshot(type="jpeg", quality=55, timeout=10_000)
     except Exception:
         line.screenshot = None
 

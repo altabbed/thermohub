@@ -79,6 +79,10 @@ STATIC = Path(__file__).parent / "static"
 # Cart jobs run after the request that started them; keep them from being garbage collected.
 _running: set[asyncio.Task[None]] = set()
 
+# A sign-in screen nobody has touched for this long is closed. It holds the store's
+# browser, so a screen left open in a tab would keep every cart waiting.
+SIGN_IN_IDLE_SECONDS = 300
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -485,21 +489,38 @@ async def send_to_carts(
             preferences.remember(order.store, line.key, line.product_id, line.name, line.quantity)
 
     task = asyncio.create_task(fill_carts(job, browsers, sites, remember))
+    job.task = task
     _running.add(task)
     task.add_done_callback(_running.discard)
-    return _job_view(job, sites)
+    return _job_view(job, sites, browsers)
 
 
 @api.get("/carts/{job_id}", response_model=CartJobView)
 async def get_cart_job(
     job_id: str,
+    browsers: Annotated[Browsers, Depends(get_browsers)],
     jobs: Annotated[dict[str, CartJob], Depends(get_cart_jobs)],
     sites: Annotated[dict[str, StoreSite], Depends(get_sites)],
 ) -> CartJobView:
     job = jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="That cart job has finished and been cleared.")
-    return _job_view(job, sites)
+    return _job_view(job, sites, browsers)
+
+
+@api.post("/carts/{job_id}/stop", response_model=CartJobView)
+async def stop_cart_job(
+    job_id: str,
+    browsers: Annotated[Browsers, Depends(get_browsers)],
+    jobs: Annotated[dict[str, CartJob], Depends(get_cart_jobs)],
+    sites: Annotated[dict[str, StoreSite], Depends(get_sites)],
+) -> CartJobView:
+    """Stop adding to the carts. What is already in them stays there."""
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="That cart job has finished and been cleared.")
+    job.stop()
+    return _job_view(job, sites, browsers)
 
 
 @api.post("/choices", status_code=204)
@@ -574,7 +595,30 @@ async def _check_store(store: Store, signed_in: bool) -> Connection:
     return connection("connected", "Prices available")
 
 
-def _job_view(job: CartJob, sites: dict[str, StoreSite]) -> CartJobView:
+def _waiting_for(
+    job: CartJob, order: CartOrder, sites: dict[str, StoreSite], browsers: Browsers
+) -> str | None:
+    """Why an order hasn't started: another order in the job, or the store's browser."""
+    position = next(i for i, o in enumerate(job.orders) if o is order)
+    earlier = job.orders[:position]
+    if ahead := next((o for o in earlier if o.state in ("waiting", "running")), None):
+        return f"Waiting for your {sites[ahead.store].name} cart to finish first."
+    name = sites[order.store].name
+    match browsers.doing(order.store):
+        case "sign-in":
+            return (
+                f"Waiting for a {name} sign-in that is still open, on another screen or tab. "
+                f"Close it, or it closes itself after {SIGN_IN_IDLE_SECONDS // 60} minutes "
+                "without a tap."
+            )
+        case "cart":
+            return f"Waiting for an earlier {name} cart to finish."
+        case "sign-out":
+            return f"Waiting for {name} to finish signing out."
+    return None
+
+
+def _job_view(job: CartJob, sites: dict[str, StoreSite], browsers: Browsers) -> CartJobView:
     return CartJobView(
         id=job.id,
         finished=job.finished,
@@ -584,7 +628,9 @@ def _job_view(job: CartJob, sites: dict[str, StoreSite]) -> CartJobView:
                 name=sites[order.store].name,
                 state=order.state,  # type: ignore[arg-type]
                 cart_url=sites[order.store].cart_url,
-                message=order.message,
+                message=_waiting_for(job, order, sites, browsers)
+                if order.state == "waiting"
+                else order.message,
                 lines=[
                     CartLineView(
                         product_id=line.product_id,
@@ -671,15 +717,17 @@ async def store_sign_in(
         elif site is None:
             await send({"type": "error", "message": "Thermohub doesn't know that store."})
         elif browsers.lock(store_id).locked():
-            await send(
-                {
-                    "type": "error",
-                    "message": f"Thermohub is busy with your {site.name} cart. "
-                    "Try again in a minute.",
-                }
-            )
+            if browsers.doing(store_id) == "sign-in":
+                busy = (
+                    f"Thermohub is busy: a {site.name} sign-in is already open, on another "
+                    f"screen or tab. Close that one, or wait: it closes itself after "
+                    f"{SIGN_IN_IDLE_SECONDS // 60} minutes without a tap."
+                )
+            else:
+                busy = f"Thermohub is busy with your {site.name} cart. Try again in a minute."
+            await send({"type": "error", "message": busy})
         else:
-            async with browsers.lock(store_id):
+            async with browsers.busy(store_id, "sign-in"):
                 await _run_sign_in(websocket, LiveSignIn(browsers, site, send), hello, send)
     except WebSocketDisconnect:
         pass
@@ -706,7 +754,18 @@ async def _run_sign_in(
             int(hello.get("width") or 390), int(hello.get("height") or 700), hello.get("scale") or 1
         )
         while True:
-            message = await websocket.receive_json()
+            try:
+                message = await asyncio.wait_for(websocket.receive_json(), SIGN_IN_IDLE_SECONDS)
+            except TimeoutError:
+                await send(
+                    {
+                        "type": "error",
+                        "message": f"This sign-in was closed after {SIGN_IN_IDLE_SECONDS // 60} "
+                        "minutes without a tap, so it doesn't keep your cart waiting. "
+                        "Tap Try again to start over.",
+                    }
+                )
+                return
             kind = message.get("type")
             try:
                 if kind == "tap":

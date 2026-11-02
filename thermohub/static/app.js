@@ -1246,8 +1246,9 @@ function showCart(root) {
 function followCart(body) {
   setTimeout(async () => {
     if (!body.isConnected) return;
+    let job;
     try {
-      data.cartJob = await api(`carts/${data.cartJob.id}`);
+      job = await api(`carts/${data.cartJob.id}`);
     } catch (err) {
       if (err instanceof NeedsKey) return showKeyScreen();
       if (err.status === 404) {
@@ -1258,8 +1259,11 @@ function followCart(body) {
       return body.isConnected && followCart(body); // Thermohub blinked; keep trying
     }
     if (!body.isConnected) return;
-    drawCart(body);
-    if (data.cartJob.finished) data.accounts = null; // a shop may have signed out
+    // Draw only what changed: a button redrawn under a finger misses the tap.
+    const changed = JSON.stringify(job) !== JSON.stringify(data.cartJob);
+    data.cartJob = job;
+    if (changed) drawCart(body);
+    if (job.finished) data.accounts = null; // a shop may have signed out
     else followCart(body);
   }, 1500);
 }
@@ -1288,7 +1292,9 @@ function drawCart(body) {
     el("div", { class: "title" }, el("h1", {}, title), el("p", {}, sub)),
     // With one shop, its cart button sits at the bottom of the screen instead.
     job.orders.map((order) => orderCard(order, job.orders.length > 1)),
-    job.finished ? el("div", {}, el("a", { class: "button secondary small", href: "#list" }, "Back to shopping list")) : null);
+    job.finished
+      ? el("div", {}, el("a", { class: "button secondary small", href: "#list" }, "Back to shopping list"))
+      : el("div", {}, el("button", { class: "button secondary small", type: "button", onclick: () => stopCart(body) }, "Stop")));
 
   const done = job.orders.filter((o) => o.lines.some((l) => l.status === "added") && safeUrl(o.cart_url));
   if (job.finished && job.orders.length === 1 && done.length === 1) {
@@ -1297,6 +1303,18 @@ function drawCart(body) {
   } else {
     hideAction();
   }
+}
+
+// Stop adding: what is already in the cart stays there.
+async function stopCart(body) {
+  try {
+    data.cartJob = await api(`carts/${data.cartJob.id}/stop`, { method: "POST" });
+    data.accounts = null;
+  } catch (err) {
+    if (err instanceof NeedsKey) return showKeyScreen();
+    return; // Thermohub blinked; the button is still there to try again
+  }
+  if (body.isConnected) drawCart(body);
 }
 
 const LINE_ICON = { waiting: "circle", added: "check", failed: "warn", skipped: "minus" };
@@ -1314,7 +1332,9 @@ function orderCard(order, cartLink) {
     : null;
 
   let foot = null;
-  if (order.state === "needs_sign_in") {
+  if (order.state === "waiting" && order.message) {
+    foot = el("div", { class: "order-foot attention" }, el("p", {}, order.message));
+  } else if (order.state === "needs_sign_in") {
     foot = el("div", { class: "order-foot attention" },
       el("p", {}, `${order.name} needs you to sign in before Thermohub can add to your cart.`),
       el("div", { class: "confirm" },

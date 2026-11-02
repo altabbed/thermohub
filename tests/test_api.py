@@ -13,7 +13,7 @@ import uvicorn
 from tests.pantry_fixture import PANTRY
 from tests.test_compare import FakeStore, product
 from thermohub import main
-from thermohub.browser import SITES
+from thermohub.browser import SITES, Browsers, CartJob, CartLine, CartOrder
 from thermohub.config import Settings, get_settings
 from thermohub.cookidoo_client import Account, NotSignedIn, UnknownRegion
 from thermohub.main import (
@@ -69,12 +69,21 @@ class FakeCookidoo:
 
 
 class FakeBrowsers:
+    busy = Browsers.busy
+    doing = Browsers.doing
+
     def __init__(self, signed_in=()):
         self.signed = set(signed_in)
         self.locks = {}
+        self._doing = {}
 
     def lock(self, store_id):
         return self.locks.setdefault(store_id, asyncio.Lock())
+
+    def hold(self, store_id, doing):
+        """Take the store's browser and keep it, as a sign-in or a cart in progress would."""
+        asyncio.run(self.lock(store_id).acquire())
+        self._doing[store_id] = doing
 
     def signed_in(self, store_id):
         return store_id in self.signed
@@ -576,6 +585,7 @@ def test_send_to_carts(fake_fill, tmp_path):
     ]
     [job] = fake_fill
     assert job.orders[0].lines[0].quantity == 2
+    assert job.task is not None  # so the job can be stopped
 
     progress = client.get(f"/api/carts/{body['id']}").json()
     assert progress["finished"] is True
@@ -606,8 +616,6 @@ def test_send_to_carts_only_opens_the_store_own_pages(fake_fill, url):
 
 
 def test_cart_job_failure_shows_screenshot():
-    from thermohub.browser import CartJob, CartLine, CartOrder
-
     line = CartLine("c1", "Saffron", "https://www.coles.com.au/product/c1", status="failed")
     line.screenshot = b"\xff\xd8jpeg"
     order = CartOrder(store="coles", lines=[line], state="done")
@@ -627,6 +635,76 @@ def test_old_cart_jobs_are_cleared(fake_fill):
 
     assert len(jobs) == 20
     assert ids[0] not in jobs and ids[-1] in jobs
+
+
+def waiting_job(*stores):
+    orders = [
+        CartOrder(store=store, lines=[CartLine("p", "Milk", f"https://{store}.example/milk")])
+        for store in stores
+    ]
+    return CartJob(id="j1", orders=orders)
+
+
+@pytest.mark.parametrize(
+    ("holder", "message"),
+    [
+        ("sign-in", "Waiting for a Woolworths sign-in that is still open"),
+        ("cart", "Waiting for an earlier Woolworths cart to finish."),
+        ("sign-out", "Waiting for Woolworths to finish signing out."),
+        (None, None),  # the browser is free: it is about to start
+    ],
+)
+def test_a_waiting_cart_says_what_it_is_waiting_for(holder, message):
+    browsers = FakeBrowsers(["woolworths"])
+    if holder:
+        browsers.hold("woolworths", holder)
+    client = make_client(browsers=browsers, jobs={"j1": waiting_job("woolworths")})
+
+    order = client.get("/api/carts/j1").json()["orders"][0]
+
+    assert order["state"] == "waiting"
+    if message is None:
+        assert order["message"] is None
+    else:
+        assert order["message"].startswith(message)
+    if holder == "sign-in":
+        assert "closes itself after 5 minutes" in order["message"]
+
+
+def test_a_cart_waits_for_the_order_before_it_in_the_job():
+    job = waiting_job("coles", "woolworths")
+    job.orders[0].state = "running"
+    browsers = FakeBrowsers(["coles", "woolworths"])
+    browsers.hold("woolworths", "sign-in")  # the earlier order is named first
+    client = make_client(browsers=browsers, jobs={"j1": job})
+
+    coles, woolworths = client.get("/api/carts/j1").json()["orders"]
+
+    assert coles["message"] is None
+    assert woolworths["message"] == "Waiting for your Coles cart to finish first."
+
+
+def test_stopping_a_cart_job():
+    job = waiting_job("coles", "woolworths")
+    job.orders[0].state = "done"
+    job.orders[0].lines[0].status = "added"
+    client = make_client(jobs={"j1": job})
+
+    stopped = client.post("/api/carts/j1/stop")
+
+    assert stopped.status_code == 200
+    coles, woolworths = stopped.json()["orders"]
+    assert stopped.json()["finished"] is True
+    assert (coles["state"], coles["lines"][0]["status"]) == ("done", "added")  # kept as it was
+    assert (woolworths["state"], woolworths["lines"][0]["status"]) == ("failed", "skipped")
+    assert woolworths["message"] == "You stopped this."
+    assert client.post("/api/carts/nope/stop").status_code == 404
+
+
+def test_stopping_a_cart_job_needs_the_key():
+    client = make_client(api_key="s3cret", jobs={"j1": waiting_job("woolworths")})
+
+    assert client.post("/api/carts/j1/stop").status_code == 401
 
 
 class FakeLiveSignIn:
@@ -747,6 +825,62 @@ def test_store_sign_in_websocket_while_busy(live):
 
     assert "busy" in reply["message"]
     assert live == []
+
+
+def test_a_sign_in_that_nobody_touches_closes_itself(live, monkeypatch):
+    monkeypatch.setattr(main, "SIGN_IN_IDLE_SECONDS", 0.3)
+    browsers = FakeBrowsers()
+    client = make_client(browsers=browsers)
+
+    with client.websocket_connect("/api/stores/woolworths/sign-in") as ws:
+        ws.send_json({"type": "hello"})
+        assert ws.receive_bytes() == b"\xff\xd8frame"
+        assert browsers.doing("woolworths") == "sign-in"
+        reply = ws.receive_json()  # nothing sent: it gives up
+
+    assert reply["type"] == "error"
+    assert "closed after" in reply["message"]
+    assert "Try again" in reply["message"]
+    [session] = live
+    assert session.closed
+    assert not browsers.lock("woolworths").locked()  # a cart is no longer kept waiting
+    assert browsers.doing("woolworths") is None
+
+
+def test_a_sign_in_that_is_being_used_stays_open(live, monkeypatch):
+    monkeypatch.setattr(main, "SIGN_IN_IDLE_SECONDS", 0.6)
+    browsers = FakeBrowsers()
+    client = make_client(browsers=browsers)
+
+    with client.websocket_connect("/api/stores/woolworths/sign-in") as ws:
+        ws.send_json({"type": "hello"})
+        assert ws.receive_bytes() == b"\xff\xd8frame"
+        for _ in range(4):  # 1.2s in all, twice the limit, but never 0.6s without a tap
+            time.sleep(0.3)
+            ws.send_json({"type": "tap", "x": 1, "y": 2})
+            assert ws.receive_json() == {"type": "editable", "value": True}
+        assert not live[0].closed
+        assert browsers.doing("woolworths") == "sign-in"
+        ws.send_json({"type": "cancel"})
+
+
+def test_a_second_sign_in_says_the_first_is_still_open(live):
+    browsers = FakeBrowsers()
+    client = make_client(browsers=browsers)
+
+    with client.websocket_connect("/api/stores/woolworths/sign-in") as first:
+        first.send_json({"type": "hello"})
+        assert first.receive_bytes() == b"\xff\xd8frame"
+        with client.websocket_connect("/api/stores/woolworths/sign-in") as second:
+            second.send_json({"type": "hello"})
+            reply = second.receive_json()
+        assert not live[0].closed  # the first one carries on
+        first.send_json({"type": "cancel"})
+
+    assert reply["type"] == "error"
+    assert reply["message"].startswith("Thermohub is busy: a Woolworths sign-in is already open")
+    assert "closes itself after 5 minutes" in reply["message"]
+    assert len(live) == 1
 
 
 def test_uvicorn_can_serve_the_sign_in_websocket():

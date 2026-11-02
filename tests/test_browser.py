@@ -103,6 +103,7 @@ class FakeMart:
     def __init__(self):
         self.cart = {}
         self.logins = []  # what each sign-in form sent
+        self.release = asyncio.Event()  # the "hangs" product page answers once this is set
         app = web.Application()
         app.router.add_get("/framed", self.framed_login)
         app.router.add_get("/login", self.login_page)
@@ -173,6 +174,8 @@ class FakeMart:
             return web.Response(text=NO_STEPPER.format(pid=pid), content_type="text/html")
         if pid == "redirects":
             raise web.HTTPFound("/product/redirects")  # the page never loads
+        if pid == "hangs":
+            await self.release.wait()  # the shop doesn't answer
         return web.Response(text=PRODUCT.format(pid=pid), content_type="text/html")
 
     async def add(self, request):
@@ -186,6 +189,7 @@ async def mart():
     fake = FakeMart()
     await fake.server.start_server()
     yield fake
+    fake.release.set()
     await fake.server.close()
 
 
@@ -499,6 +503,115 @@ async def test_fill_cart_says_what_happened_when_a_line_fails(browsers, mart, mo
     assert lentils.status == "failed"
     assert lentils.message == "Couldn't add this from the Fakemart page."
     assert added == []  # neither becomes the remembered product
+
+
+@pytest.mark.anyio
+async def test_fill_cart_moves_on_from_an_item_that_takes_too_long(browsers, mart, monkeypatch):
+    monkeypatch.setattr(browser_module, "LINE_SECONDS", 2)
+    await sign_in_with_cookie(browsers, mart)
+    browsers.set_signed_in("fakemart", True)
+    order = CartOrder(
+        store="fakemart",
+        lines=[
+            CartLine("hangs", "Rice", mart.url("/product/hangs")),
+            CartLine("p1", "Onions", mart.url("/product/p1")),
+        ],
+    )
+    job = CartJob(id="job", orders=[order])
+
+    await asyncio.wait_for(fill_carts(job, browsers, {"fakemart": mart.site()}), timeout=30)
+
+    rice, onions = order.lines
+    assert rice.status == "failed"
+    assert rice.message == (
+        "Fakemart took too long on this one, so Thermohub moved on. "
+        "Check your Fakemart cart in case it went in."
+    )
+    assert onions.status == "added"  # the next item still went in
+    assert mart.cart == {"p1": 1}
+    assert order.state == "done"
+    assert not browsers.lock("fakemart").locked()
+
+
+@pytest.mark.anyio
+async def test_a_cart_job_can_be_stopped_while_it_works(browsers, mart):
+    await sign_in_with_cookie(browsers, mart)
+    browsers.set_signed_in("fakemart", True)
+    order = CartOrder(
+        store="fakemart",
+        lines=[
+            CartLine("p1", "Onions", mart.url("/product/p1")),
+            CartLine("hangs", "Rice", mart.url("/product/hangs")),
+            CartLine("p2", "Tomatoes", mart.url("/product/p2")),
+        ],
+    )
+    job = CartJob(id="job", orders=[order])
+    job.task = asyncio.ensure_future(fill_carts(job, browsers, {"fakemart": mart.site()}))
+    await wait_for(lambda: order.lines[1].status == "adding")
+
+    job.stop()
+    await asyncio.wait({job.task}, timeout=20)
+
+    assert job.task.cancelled()
+    assert job.finished
+    assert order.state == "failed"
+    assert order.message == "You stopped this."
+    assert [line.status for line in order.lines] == ["added", "skipped", "skipped"]
+    assert mart.cart == {"p1": 1}  # what went in stays; nothing more does
+    assert not browsers.lock("fakemart").locked()
+    await wait_for(lambda: browsers._pages_open["fakemart"] == 0)  # its page is closed
+
+
+@pytest.mark.anyio
+async def test_a_cart_waiting_for_an_open_sign_in_says_so_and_can_be_stopped(browsers, mart):
+    browsers.set_signed_in("fakemart", True)
+    order = CartOrder(store="fakemart", lines=[CartLine("p1", "Onions", mart.url("/product/p1"))])
+    job = CartJob(id="job", orders=[order])
+
+    async with browsers.busy("fakemart", "sign-in"):
+        job.task = asyncio.ensure_future(fill_carts(job, browsers, {"fakemart": mart.site()}))
+        await asyncio.sleep(0.5)
+        assert order.state == "waiting"  # held back by the sign-in
+        assert browsers.doing("fakemart") == "sign-in"
+
+        job.stop()
+        await asyncio.wait({job.task}, timeout=5)
+
+        assert job.task.cancelled()
+        assert order.state == "failed"
+        assert order.lines[0].status == "skipped"
+        assert browsers.doing("fakemart") == "sign-in"  # the sign-in is left alone
+    assert browsers.doing("fakemart") is None
+    assert mart.cart == {}
+
+
+@pytest.mark.anyio
+async def test_a_cart_job_stopped_before_it_starts_is_still_finished(browsers, mart):
+    browsers.set_signed_in("fakemart", True)
+    order = CartOrder(store="fakemart", lines=[CartLine("p1", "Onions", mart.url("/product/p1"))])
+    job = CartJob(id="job", orders=[order])
+    job.task = asyncio.ensure_future(fill_carts(job, browsers, {"fakemart": mart.site()}))
+
+    job.stop()  # before the task has had a turn
+    await asyncio.wait({job.task}, timeout=5)
+
+    assert job.task.cancelled()
+    assert job.finished
+    assert order.lines[0].status == "skipped"
+
+
+@pytest.mark.anyio
+async def test_the_browser_says_what_holds_it(browsers):
+    assert browsers.doing("fakemart") is None
+    async with browsers.busy("fakemart", "cart"):
+        assert browsers.doing("fakemart") == "cart"
+    assert browsers.doing("fakemart") is None
+
+    with pytest.raises(RuntimeError):
+        async with browsers.busy("fakemart", "sign-in"):
+            raise RuntimeError("the sign-in broke")
+    assert browsers.doing("fakemart") is None  # let go even then
+    assert not browsers.lock("fakemart").locked()
 
 
 @pytest.mark.anyio
