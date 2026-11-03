@@ -195,7 +195,10 @@ async def check_shop(
         async with browsers.page(site.id) as page:
             await done(await account_page(site, page))
     except Exception as e:
-        await done(Check("Start Thermohub's browser", False, first_line(e, 300)))
+        # Playwright puts what Chromium printed after its first line, and that
+        # is usually the reason it would not start.
+        detail = " ".join(str(e).split())[:1500]
+        await done(Check("Start Thermohub's browser", False, first_line(e, 300), {"error": detail}))
     return checks
 
 

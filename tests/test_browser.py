@@ -26,7 +26,8 @@ from thermohub.browser import (
     fill_carts,
     sign_in_state,
 )
-from thermohub.stores import Coles, StoreBlocked, Woolworths
+from thermohub.diagnose import check_shop
+from thermohub.stores import Coles, StoreBlocked, StoreError, Woolworths
 
 CHROMIUM = os.environ.get("THERMOHUB_TEST_CHROMIUM") or (
     "/opt/pw-browsers/chromium" if Path("/opt/pw-browsers/chromium").exists() else None
@@ -660,6 +661,69 @@ async def test_fill_cart_when_the_browser_will_not_start(tmp_path, mart):
     assert "browser" in order.message
     assert order.lines[0].status == "skipped"
     assert job.finished
+
+
+def leave_a_lock(profile: Path) -> Path:
+    """What a browser killed mid-run leaves behind: a lock in another host's name."""
+    profile.mkdir(parents=True)
+    lock = profile / "SingletonLock"
+    try:
+        lock.symlink_to("another-computer-4242")
+    except OSError:  # Windows without the right to make links
+        lock.write_text("another-computer-4242")
+    return lock
+
+
+@pytest.mark.anyio
+async def test_a_lock_left_by_a_killed_browser_does_not_stop_the_next_one(tmp_path):
+    lock = leave_a_lock(tmp_path / "browser" / "fakemart")
+    # The rest of what it leaves; the socket's target is long gone.
+    for name in ("SingletonSocket", "SingletonCookie"):
+        try:
+            (lock.parent / name).symlink_to("/tmp/.org.chromium.Chromium.gone/" + name)
+        except OSError:
+            (lock.parent / name).write_text("gone")
+    browsers = Browsers(tmp_path, CHROMIUM)
+
+    try:
+        page = await (await browsers.context("fakemart")).new_page()
+        await page.set_content("<p>hello</p>")
+        assert await page.inner_text("p") == "hello"
+    finally:
+        await browsers.close()
+
+    assert not (lock.is_symlink() and os.readlink(lock) == "another-computer-4242")
+    assert not (lock.parent / "SingletonSocket").exists()
+    assert not (lock.parent / "SingletonSocket").is_symlink()
+
+
+@pytest.mark.anyio
+async def test_the_browser_check_gives_the_whole_error_when_it_will_not_start(mart):
+    class Closed:
+        name = "Fakemart"
+
+        async def search_plainly(self, term):
+            raise StoreError("The shop is closed.")
+
+        async def close(self):
+            pass
+
+    class WontStart:
+        def page(self, store_id):
+            # Playwright's message: one line, then what Chromium printed.
+            raise RuntimeError(
+                "BrowserType.launch_persistent_context: Target closed\n"
+                "Browser logs:\n"
+                "[err] The profile appears to be in use by another process on another computer"
+            )
+
+    checks = await check_shop(Closed(), mart.site(), WontStart())
+
+    started = checks[-1]
+    assert started.name == "Start Thermohub's browser"
+    assert not started.ok
+    assert "another computer" not in started.summary
+    assert "in use by another process on another computer" in started.facts["error"]
 
 
 @pytest.mark.anyio

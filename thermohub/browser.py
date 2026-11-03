@@ -66,6 +66,24 @@ class SignedOut(Exception):
     """The store asked to sign in again."""
 
 
+# What Chromium leaves in a profile to say it is open. One records the host's
+# name, so when a browser is killed (or the container is replaced by an update
+# and gets a new name) the next Chromium finds a lock from "another computer"
+# and quits at once.
+_PROFILE_LOCKS = ("SingletonLock", "SingletonSocket", "SingletonCookie")
+
+
+def _clear_profile_locks(profile: Path) -> None:
+    """Remove the locks of a browser that is no longer running. Thermohub is the
+    only user of its profiles, and calls this only when it has none open.
+    """
+    for name in _PROFILE_LOCKS:
+        try:
+            (profile / name).unlink(missing_ok=True)
+        except OSError:
+            _LOGGER.warning("Couldn't clear %s from the %s profile", name, profile.name)
+
+
 class Browsers:
     """One Chromium profile per store, started when needed and closed when idle."""
 
@@ -119,6 +137,7 @@ class Browsers:
                 self._playwright = await async_playwright().start()
             profile = self._root / store_id
             profile.mkdir(parents=True, exist_ok=True)
+            _clear_profile_locks(profile)
             context = await self._playwright.chromium.launch_persistent_context(
                 str(profile),
                 executable_path=self._executable,
